@@ -1,4 +1,4 @@
-# Brute Force PC recomp - installer.
+﻿# Brute Force PC recomp - installer.
 # Copies the loader to %LOCALAPPDATA%\BruteForceRecomp, finds your own copy of the game, sets up online play if you want it,
 # and puts a "Brute Force" shortcut on the desktop. Nothing from the game itself is in this download: it runs your copy.
 param([string]$Target = "$env:LOCALAPPDATA\BruteForceRecomp", [switch]$NoShortcut, [string]$GameFolder = "", [string]$Online = "")
@@ -48,35 +48,14 @@ Write-Host "  Game folder: $game"
 
 # 3. online play: PLAY ONLINE in the game's menu finds matches through the online server (server.txt holds its address)
 $np = Join-Path $Target 'netplay.txt'
-$srvFile = Join-Path $Target 'server.txt'
-$server = if (Test-Path $srvFile) { (Get-Content $srvFile -TotalCount 1).Trim() } else { "" }
-$mode = $Online
-if (-not $mode) {
-    Write-Host ""
-    Write-Host "  Online play (PLAY ONLINE in the game's menu):"
-    Write-Host "    Enter = public: see and join every open match     P = private match with a password     N = offline"
-    $mode = (Read-Host "  Your choice").Trim()
-    if (-not $mode) { $mode = 'public' }
+# Milestone 100: online play needs no setup. PLAY ONLINE goes through the online server's relay (server.txt), so nobody forwards
+# ports. An old netplay.txt from the match-list version (list / upnp lines) is removed; other settings (password, offline) stay.
+if (Test-Path $np) {
+    $old = @(Get-Content $np | Where-Object { $_ -notmatch '^\s*(list|upnp|host)\b' -and $_.Trim() })
+    if ($old.Count) { Set-Content $np $old -Encoding ascii } else { Remove-Item $np }
 }
-if ($mode -match '^[Nn]') { if (Test-Path $np) { Remove-Item $np }; Write-Host "  Online play off (run the installer again to turn it on)." }
-else {
-    if (-not $server) { $server = (Read-Host "  The online server's address (for example play.example.org)").Trim() }
-    if (-not $server) { Write-Host "  No server address: online play stays off." -ForegroundColor Yellow }
-    else {
-        $lines = if ($server -match '^https://') { @("list $server") } else { @("online $server") }   # a match list (https://...workers.dev) or a relay server
-        if ($mode -match '^[Pp]') {
-            $pw = (Read-Host "  Password for your private matches (everyone in the match types the same one)").Trim()
-            if ($pw) { $lines += "password $pw"; Write-Host "  Private: only players with this password see your matches." } else { Write-Host "  No password given: public." }
-        } else { Write-Host "  Public: you see every open match, and yours are listed for everyone." }
-        if ($server -match '^https://') {
-            Write-Host "  To host matches, other players must reach this PC: the game can ask your router to open its port (UDP 34567)"
-            Write-Host "  while it runs and close it afterwards (UPnP). Without it you can still join matches."
-            if ((Read-Host "  Let the game open its port on the router while it runs? (Y/N)") -match '^[Yy]') { $lines += "upnp"; Write-Host "  The port opens when the game starts and closes when it ends (online_port.log)." }
-        }
-        Set-Content $np $lines -Encoding ascii
-    }
-}
-
+if ($Online -match '^[Nn]') { Set-Content $np 'offline' -Encoding ascii; Write-Host "  Online play off (netplay.txt says offline)." }
+else { Write-Host "  Online play: on. Pick PLAY ONLINE in the game to host or join; no router setup needed." }
 # 4. shortcuts
 if (-not $NoShortcut) {
     $ws = New-Object -ComObject WScript.Shell

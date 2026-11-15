@@ -108,6 +108,13 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   - **Online:** System Link over UDP (`net.c`, emulated NVNET chip; `netplay.txt` = `host` / `join addr`). Hosting is tested; joining from a 2nd PC is not yet.
   - **Window:** full screen by default (F11 toggles, `windowed.txt`).
   - **Download:** `dist\make_dist.ps1` -> BruteForceRecomp.zip. It holds an installer plus patches (`tools\make_patches.py` after editing game files); never put xbox_hdd in it.
+- Milestone 100 (online relay): PLAY ONLINE needs no setup. Every loader runs net.c's BFN2 "online" mode against bflist.exe
+  ("relay" mode) on 127.0.0.1:<port-1>; the helper carries the frames over a WebSocket to the worker's Durable Object relay
+  rooms (dist\matchlist, wss://brute-force-list...workers.dev/relay?room=R, a MAC-learning switch). On by default from
+  server.txt; old "list" lines mean the relay; "offline" in netplay.txt turns it off; "password" = private room.
+  Deploy the worker: `npx wrangler@4 deploy` in dist\matchlist. relay_log.txt = helper connects/disconnects.
+  Original (unpatched) default.xbe: the start-up disc authentication is skipped in memory (jge -> jmp at 0x2F8257).
+  The in-game widescreen widening is off by default (wide.txt): it made the view pull back further after each sprint.
 - Next: weapon poses (bone level), camera collision, START icon in HUD text draws black.
 - Semaphore releases (0x1D70) are now written to D3D's fence word, replacing the GET==PUT fence shortcut.
 - Test aids: `bench.txt` (renderer benchmark at start), `rbench.bat` (standalone), the `[profile]` log lines

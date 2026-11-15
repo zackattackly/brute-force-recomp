@@ -4,7 +4,8 @@ $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot; $ld = Join-Path $here '..\loader'; $f = Join-Path $here 'files'
 New-Item -ItemType Directory -Force $f | Out-Null
 if (Test-Path (Join-Path $here 'server.txt')) { Copy-Item (Join-Path $here 'server.txt') $f -Force }   # the online server's address (set once by whoever runs the server)
-foreach ($n in 'bflaunch.exe','bfcore.dll','bfview.exe','bfserver.exe','bflist.exe','bruteforce.ico','razorback.stl','razorback_tex.raw','razor_shots.wav','razor_reload.wav','razorhand.txt','razorhand_ready.txt') { Copy-Item (Join-Path $ld $n) $f -Force }
+foreach ($n in 'Start online server.bat','bfserver.exe','online_port.ps1') { $old = Join-Path $f $n; if (Test-Path $old) { Remove-Item $old -Force } }   # Milestone 100: the relay replaces them
+foreach ($n in 'bflaunch.exe','bfcore.dll','bfview.exe','bflist.exe','bruteforce.ico','razorback.stl','razorback_tex.raw','razor_shots.wav','razor_reload.wav','razorhand.txt','razorhand_ready.txt') { Copy-Item (Join-Path $ld $n) $f -Force }
 New-Item -ItemType Directory -Force (Join-Path $f 'patches') | Out-Null
 Copy-Item (Join-Path $ld 'patches\*.bfp') (Join-Path $f 'patches') -Force
 $zip = Join-Path $here '..\BruteForceRecomp.zip'; if (Test-Path $zip) { Remove-Item $zip }

@@ -45,9 +45,89 @@ static void putn(char **w, u32 v) { char d[12]; int z = 0; do d[z++] = (char)('0
 static void putip(char **w, u32 ip) { for (int k = 0; k < 4; k++) { putn(w, (ip >> (k * 8)) & 255); if (k < 3) *(*w)++ = '.'; } }
 static const char *word(const char *c, char *o, u32 cap) { while (*c == ' ') c++; u32 k = 0; int q = *c == '"'; if (q) c++; while (*c && (q ? *c != '"' : *c != ' ') && k < cap - 1) o[k++] = *c++; if (q && *c) c++; o[k] = 0; return c; }
 
+/* ---- Milestone 100: relay mode ----
+ * bflist.exe relay <host> <path or -> <room> <game port> <loader pid>
+ * The loader runs its "online" mode (BFN2 + room + frame, a keep-alive = no frame) against this helper on 127.0.0.1:<port - 1>;
+ * the frames go over one WebSocket to wss://<host><path>/relay?room=R (a Durable Object that switches them between the
+ * players of the room), and what comes back goes to the loader as BFN2 packets. An outgoing HTTPS connection: no router setup. */
+K32 HANDLE WINAPI CreateThread(void *, u32, u32 (WINAPI *)(void *), void *, u32, u32 *);
+K32 HANDLE WINAPI CreateFileA(const char *, DWORD, DWORD, void *, DWORD, DWORD, HANDLE);
+K32 BOOL WINAPI WriteFile(HANDLE, const void *, DWORD, DWORD *, void *);
+K32 BOOL WINAPI CloseHandle(HANDLE);
+static BOOL (WINAPI *w_option)(void *, u32, void *, u32); static void *(WINAPI *w_upgrade)(void *, u32);
+static u32 (WINAPI *w_wsend)(void *, u32, void *, u32); static u32 (WINAPI *w_wrecv)(void *, void *, u32, u32 *, u32 *); static u32 (WINAPI *w_wclose)(void *, u16, void *, u32);
+static int (WINAPI *p_select)(int, void *, void *, void *, const s32 *);
+static volatile void *g_ws; static volatile u32 g_wlock, g_rx, g_tx, g_room, g_sock; static SIN g_loader;
+static void wl(void) { while (__sync_lock_test_and_set(&g_wlock, 1)) Sleep(0); } static void wu(void) { __sync_lock_release(&g_wlock); }
+static void logl(const char *s) {   /* relay_log.txt next to the game: connects and disconnects only */
+    HANDLE f = CreateFileA("relay_log.txt", 0x04 /* FILE_APPEND_DATA */, 1, 0, 4 /* OPEN_ALWAYS */, 0x80, 0); if (f == (HANDLE)-1) return;
+    char b[160], *w = b; putn(&w, GetTickCount() / 1000); put(&w, " s: "); put(&w, s); put(&w, "\r\n"); DWORD n; WriteFile(f, b, (DWORD)(w - b), &n, 0); CloseHandle(f); }
+static void *ws_connect(void) {
+    char q[192], *w = q; put(&w, g_path); put(&w, "/relay?room="); putn(&w, g_room); *w = 0;
+    u16 wh[128], wp[256]; static const u16 GET[] = {'G','E','T',0}; wide(wh, g_host, 128); wide(wp, q, 256);
+    void *c = w_connect(g_ses, wh, 443, 0); if (!c) return 0;
+    void *r = w_request(c, GET, wp, 0, 0, 0, 0x00800000 /* SECURE */); if (!r) { w_close(c); return 0; }
+    void *ws = 0;
+    if (w_option(r, 114 /* WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET */, 0, 0) && w_send(r, 0, 0, 0, 0, 0, 0) && w_receive(r, 0)) ws = w_upgrade(r, 0);
+    w_close(r); if (!ws) w_close(c);   /* (the connection handle stays open while the WebSocket lives) */
+    return ws; }
+static u32 WINAPI rx_thread(void *unused) {   /* relay -> loader */
+    (void)unused; static u8 b[2048];
+    for (;;) {
+        void *ws = (void *)g_ws; if (!ws) { Sleep(50); continue; }
+        u32 n = 0, type = 0; u32 e = w_wrecv(ws, b + 8, sizeof b - 8, &n, &type);
+        if (e || type == 4 /* close */) { wl(); if (g_ws == ws) { g_ws = 0; w_close(ws); logl("relay connection lost"); } wu(); continue; }
+        if (type == 0 /* a whole binary message */ && n >= 14) { *(u32 *)b = 0x324E4642; *(u32 *)(b + 4) = g_room; p_sendto(g_sock, b, (int)n + 8, 0, &g_loader, sizeof g_loader); g_rx++; } }
+    return 0; }
+static void relay_main(HANDLE parent, u32 room, u32 port) {
+    g_room = room;
+    u32 s = p_socket(2, 2, 17); SIN me = {2, bswap16((u16)(port - 1)), 0x0100007F}; if (s == 0xFFFFFFFF || p_bind(s, &me, sizeof me)) ExitProcess(3);
+    { int big = 1 << 20; static int (WINAPI *so)(u32, int, int, const void *, int); void *ws2 = LoadLibraryA("ws2_32.dll"); *(void **)&so = GetProcAddress(ws2, "setsockopt"); if (so) { so(s, 0xFFFF, 0x1002, &big, 4); so(s, 0xFFFF, 0x1001, &big, 4); } }
+    { u32 one = 1; p_ioctlsocket(s, 0x8004667E /* FIONBIO */, &one); }   /* non-blocking: the loop below drains, then waits in select */
+    g_sock = s; SIN ld = {2, bswap16((u16)port), 0x0100007F}; g_loader = ld;
+    u32 tid; CreateThread(0, 0, rx_thread, 0, 0, &tid);
+    static u8 b[2048]; u32 heard = GetTickCount(), tryat = 0, ka = 0, fails = 0;
+    logl("relay helper started");
+    for (;;) {
+        if (parent && WaitForSingleObject(parent, 0) == 0) break;   /* the game ended */
+        u32 now = GetTickCount();
+        if (now - heard > 20000) break;                             /* no word from the loader for 20 s */
+        if (!g_ws && (int)(now - tryat) >= 0) { void *ws = ws_connect();
+            if (ws) { wl(); g_ws = ws; wu(); fails = 0; logl("relay connected"); }
+            else { fails++; tryat = now + (fails < 5 ? 1000 : 5000); if (fails == 1 || fails % 12 == 0) logl("relay connect failed (retrying)"); } }
+        struct { u32 n; u32 s[1]; } rd = {1, {s}}; s32 tv[2] = {0, 50000};
+        if (p_select(0, &rd, 0, 0, tv) > 0) for (int k = 0; k < 64; k++) {
+            SIN f; int fl = sizeof f; int n = p_recvfrom(s, b, sizeof b, 0, &f, &fl);
+            if (n < 8 || *(u32 *)b != 0x324E4642) break;
+            heard = GetTickCount();
+            if (n >= 8 + 14) { wl(); void *ws = (void *)g_ws; if (ws && w_wsend(ws, 0 /* binary message */, b + 8, (u32)n - 8) == 0) g_tx++; wu(); } }
+        if (g_ws && now - ka > 20000) { ka = now; static u8 z[1]; wl(); if (g_ws) w_wsend((void *)g_ws, 0, z, 1); wu(); }   /* keep the connection warm */
+    }
+    /* no WebSocket close handshake: WinHttpWebSocketClose waits for the server's reply, which the receive thread would take
+       (it hung here); ending the process drops the connection and the relay room forgets this player */
+    logl("relay helper ended"); (void)w_wclose;
+    ExitProcess(0); }
+
 void WINAPI start(void) {
     const char *c = GetCommandLineA(); char a[6][128]; c = word(c, a[0], 128);   /* skip the program name */
     for (int i = 0; i < 6; i++) c = word(c, a[i], 128);
+    if (a[0][0] == 'r' && a[0][1] == 'e' && a[0][2] == 'l' && a[0][3] == 'a' && a[0][4] == 'y' && !a[0][5]) {   /* relay <host> <path> <room> <port> <pid> */
+        u32 k = 0; for (; a[1][k] && k < 127; k++) g_host[k] = a[1][k]; g_host[k] = 0; k = 0; if (a[2][0] != '-') for (; a[2][k] && k < 127; k++) g_path[k] = a[2][k]; g_path[k] = 0;
+        const char *p = a[3]; u32 room = num(&p); p = a[4]; u32 port = num(&p); p = a[5]; u32 pid = num(&p);
+        if (!g_host[0] || port < 2) ExitProcess(1);
+        HANDLE parent = pid ? OpenProcess(0x00100000, 0, pid) : 0;
+        void *ws = LoadLibraryA("ws2_32.dll"), *wh = LoadLibraryA("winhttp.dll"); if (!ws || !wh) ExitProcess(2);
+        #define GP(m, v, n) *(void **)&v = GetProcAddress(m, n)
+        GP(ws, p_WSAStartup, "WSAStartup"); GP(ws, p_socket, "socket"); GP(ws, p_bind, "bind"); GP(ws, p_sendto, "sendto"); GP(ws, p_recvfrom, "recvfrom"); GP(ws, p_select, "select"); GP(ws, p_ioctlsocket, "ioctlsocket");
+        GP(wh, w_open, "WinHttpOpen"); GP(wh, w_connect, "WinHttpConnect"); GP(wh, w_request, "WinHttpOpenRequest"); GP(wh, w_send, "WinHttpSendRequest");
+        GP(wh, w_receive, "WinHttpReceiveResponse"); GP(wh, w_close, "WinHttpCloseHandle"); GP(wh, w_timeouts, "WinHttpSetTimeouts"); GP(wh, w_option, "WinHttpSetOption");
+        GP(wh, w_upgrade, "WinHttpWebSocketCompleteUpgrade"); GP(wh, w_wsend, "WinHttpWebSocketSend"); GP(wh, w_wrecv, "WinHttpWebSocketReceive"); GP(wh, w_wclose, "WinHttpWebSocketClose");
+        #undef GP
+        if (!w_upgrade || !w_wsend || !w_wrecv || !p_select) ExitProcess(5);   /* (WebSockets in WinHTTP: Windows 8 and later) */
+        static u8 wsa[512]; p_WSAStartup(0x0202, wsa);
+        static const u16 agent[] = {'B','r','u','t','e','F','o','r','c','e','R','e','c','o','m','p',0};
+        g_ses = w_open(agent, 0, 0, 0, 0); if (!g_ses) ExitProcess(4); if (w_timeouts) w_timeouts(g_ses, 8000, 8000, 8000, 0);   /* no receive timeout: the WebSocket waits */
+        relay_main(parent, room, port); }
     { u32 k = 0; for (; a[0][k] && k < 127; k++) g_host[k] = a[0][k]; g_host[k] = 0; k = 0; if (a[1][0] != '-') for (; a[1][k] && k < 127; k++) g_path[k] = a[1][k]; g_path[k] = 0; }
     const char *p; p = a[2]; u32 room = num(&p); p = a[3]; u32 port = num(&p); p = a[4]; u32 myip = ip4(&p); p = a[5]; u32 pid = num(&p);
     if (!g_host[0] || !port) ExitProcess(1);

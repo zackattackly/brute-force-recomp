@@ -6,6 +6,39 @@
 //   GET /stop?port=P          the host stopped
 //   GET /list?room=R          the matches of room R, one "address port" per line (hosts heard from in the last 90 s)
 // Room 0 is the public room; a private room is a number made from the password (the password itself is never sent).
+//   GET /relay?room=R (WebSocket)   Milestone 100: the System Link relay. Every player's game connects out to the room R relay
+//   (a Durable Object), so no router needs a port forward. Messages are the Ethernet frames of the emulated Xbox network chip;
+//   the room works like a switch: broadcasts (a search for matches) go to everyone else in the room, frames to one console go
+//   to the connection that console was last seen on (everyone else if unknown). Frames shorter than 14 bytes are keep-alives.
+
+import { DurableObject } from "cloudflare:workers";
+
+const MAX_ROOM = 64;
+const hex6 = (b, o) => { let s = ""; for (let i = 0; i < 6; i++) s += (b[o + i] | 0x100).toString(16).slice(1); return s; };
+
+export class Relay extends DurableObject {
+  async fetch(request) {
+    if (this.ctx.getWebSockets().length >= MAX_ROOM) return new Response("room full\n", { status: 503 });
+    const pair = new WebSocketPair();
+    this.ctx.acceptWebSocket(pair[1]);
+    pair[1].serializeAttachment({ mac: "" });
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+  async webSocketMessage(ws, msg) {
+    if (typeof msg === "string") return;
+    const b = new Uint8Array(msg);
+    if (b.length < 14) return;                                   // keep-alive
+    const src = hex6(b, 6), att = ws.deserializeAttachment() || {};
+    if (att.mac !== src) ws.serializeAttachment({ mac: src });   // learn which console is on this connection
+    const all = this.ctx.getWebSockets();
+    let to = null;
+    if (!(b[0] & 1)) { const dst = hex6(b, 0); to = all.find(w => w !== ws && (w.deserializeAttachment() || {}).mac === dst) || null; }
+    const send = w => { try { w.send(msg); } catch (e) {} };
+    if (to) send(to); else for (const w of all) if (w !== ws) send(w);
+  }
+  async webSocketClose(ws, code) { try { ws.close(code, "bye"); } catch (e) {} }
+  async webSocketError(ws) { try { ws.close(1011, "error"); } catch (e) {} }
+}
 
 const TTL = 90;          // seconds a host stays listed after its last report
 const MAX_LIST = 64;
@@ -50,6 +83,12 @@ export default {
       if (port === null || !hostip) return text("bad request\n", 400);
       await env.DB.prepare("DELETE FROM hosts WHERE ip = ?1 AND port = ?2").bind(hostip, port).run();
       return text("ok\n");
+    }
+    if (url.pathname === "/relay") {   // Milestone 100: the game traffic itself, over a WebSocket (no port forwarding anywhere)
+      const room = num(url.searchParams.get("room"), 0, 4294967295);
+      if (room === null) return text("bad request\n", 400);
+      if (request.headers.get("Upgrade") !== "websocket") return text("websocket expected\n", 426);
+      return env.RELAY.get(env.RELAY.idFromName("room-" + room)).fetch(request);
     }
     if (url.pathname === "/list") {
       const room = num(url.searchParams.get("room"), 0, 4294967295);

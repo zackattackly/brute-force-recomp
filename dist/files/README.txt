@@ -6,8 +6,8 @@ folder (the folder that holds default.xbe and the data folder). This download co
 
 Install
 -------
-Double-click Install.bat. It finds your game folder (or asks for it), can set up online play, and adds a "Brute Force"
-shortcut to the desktop and Start menu. Run it again any time to change the game folder or the online settings.
+Double-click Install.bat. It finds your game folder (or asks for it) and adds a "Brute Force" shortcut to the desktop and
+Start menu. Run it again any time to change the game folder or to update.
 
 Playing
 -------
@@ -19,19 +19,16 @@ Playing
 Online play (PLAY ONLINE)
 -------------------------
 The game's multiplayer menu has PLAY ONLINE (co-op campaign for 2-4 players, Deathmatch and Squad Deathmatch for 2-8).
-- Public: the installer's default. Hosting a match lists it for every online player; Join shows every open match.
-- Private: choose P in the installer and type a password. Only players who typed the same password see your matches.
-- In netplay.txt this is:  online <server address>   and, for private matches,   password <your password>
+There is nothing to set up: pick PLAY ONLINE, then host a match or join one. Every hosted match shows up for every online
+player. The game traffic goes through the online relay, so nobody needs to forward ports on a router.
+- Private matches: put a line   password <your password>   in netplay.txt (next to the game). Only players with the same
+  password see your matches.
+- No online play at all: put the word   offline   in netplay.txt.
 Everyone needs the same version of this recomp.
-
-The online server
------------------
-One PC runs the server for everyone: "Start online server.bat" (bfserver.exe). That PC needs UDP port 34567 forwarded on
-its router, and its internet address (or a name for it) goes in server.txt before the download is shared.
 
 Files
 -----
-netplay.txt   online settings (no file = offline)
+netplay.txt   optional online settings (password ..., offline); no file = online, public
 keybinds.txt  your key bindings (made by the KEY BINDINGS screen)
 windowed.txt  if this file exists the game starts in a window
 bfloader.log  the loader's log (useful when something goes wrong)

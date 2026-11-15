@@ -37,6 +37,12 @@ static int g_online; static u32 g_room;
    external_ip.txt (written by the launcher from the router, UPnP) gives the host's internet address; else the list uses the
    address it sees. "host" in netplay.txt with "list" = always registered. */
 static int g_list, g_force_host; static char g_list_host[128], g_list_path[128];
+/* Milestone 100: the relay (default). The game traffic goes through the online server's relay rooms (a Cloudflare Durable
+   Object, dist\matchlist) over an outgoing WebSocket that bflist.exe holds; the loader runs its "online" mode (BFN2) against
+   that helper on 127.0.0.1. No port forwarding, no UPnP, no host setting: every player is on one virtual System Link cable per
+   room, the game's own search finds every hosted match. On by default with the address in server.txt (next to the loader);
+   netplay.txt "relay <url>" / old "list <url>" pick another; "offline" turns online play off. */
+static int g_relay, g_relay_line, g_join_set;
 #define MAGIC3 0x334E4642   /* "BFN3" + room + frame: player to player */
 static u32 g_ext_ip;          /* our internet address as the list knows it (network byte order) */
 static u32 parse_ip(const char **p); static void ip_out(u32 a);
@@ -51,9 +57,16 @@ static int hexv(char c) { return is_digit(c) ? c - '0' : (c >= 'a' && c <= 'f') 
 static void net_config(void) {
     if (g_on >= 0) return;
     g_on = 0;
-    if (GetFileAttributesA("netplay.txt") == 0xFFFFFFFF) return;
-    char t[512]; DWORD n = 0; HANDLE f = CreateFileA("netplay.txt", 0x80000000, 1, 0, 3, 0x80, 0);
-    if (f == (HANDLE)-1) return; ReadFile(f, t, sizeof t - 1, &n, 0); CloseHandle(f); t[n] = 0;
+    char t[512]; DWORD n = 0; t[0] = 0;
+    {   HANDLE f = CreateFileA("netplay.txt", 0x80000000, 1, 0, 3, 0x80, 0);
+        if (f != (HANDLE)-1) { ReadFile(f, t, sizeof t - 1, &n, 0); CloseHandle(f); } t[n] = 0; }
+    {   /* Milestone 100: the relay by default (server.txt: the online server's https address) */
+        HANDLE f = CreateFileA("server.txt", 0x80000000, 1, 0, 3, 0x80, 0);
+        if (f != (HANDLE)-1) { char u[160] = {0}; DWORD m = 0; ReadFile(f, u, sizeof u - 1, &m, 0); CloseHandle(f); u[m] = 0; const char *q = u; while (*q == ' ') q++;
+            if (q[0] == 'h' && q[1] == 't' && q[2] == 't' && q[3] == 'p' && q[4] == 's' && q[5] == ':' && q[6] == '/' && q[7] == '/') { q += 8;
+                u32 k = 0; while (*q && *q != '/' && *q > ' ' && k < sizeof g_list_host - 1) g_list_host[k++] = *q++; g_list_host[k] = 0;
+                k = 0; while (*q && *q > ' ' && k < sizeof g_list_path - 1) g_list_path[k++] = *q++; while (k && g_list_path[k - 1] == '/') k--; g_list_path[k] = 0;
+                if (g_list_host[0]) { g_on = 1; g_relay = 1; } } } }
     {   /* the console address: from the computer name (each PC differs), unless netplay.txt says "mac" */
         char nm[64]; DWORD ln = sizeof nm; nm[0] = 0;
         BOOL (WINAPI *gcn)(char *, DWORD *) = (BOOL (WINAPI *)(char *, DWORD *))GetProcAddress(LoadLibraryA("kernel32.dll"), "GetComputerNameA");
@@ -67,17 +80,19 @@ static void net_config(void) {
         const char *w = p; while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') p++;
         u32 wl = (u32)(p - w); while (*p == ' ' || *p == '\t') p++;
         if (wl == 4 && w[0] == 'h' && w[1] == 'o' && w[2] == 's' && w[3] == 't') { g_on = 1; g_host = 1; g_force_host = 1; if (is_digit(*p)) g_port = (u16)parse_num(&p); }
-        else if (wl == 4 && w[0] == 'l' && w[1] == 'i' && w[2] == 's' && w[3] == 't') {   /* list https://host[/path] */
-            g_on = 1; g_list = 1; const char *u = p; if (u[0] == 'h' && u[1] == 't' && u[2] == 't' && u[3] == 'p' && u[4] == 's' && u[5] == ':' && u[6] == '/' && u[7] == '/') u += 8;
+        else if (wl == 7 && w[0] == 'o' && w[1] == 'f' && w[2] == 'f' && w[3] == 'l' && w[4] == 'i' && w[5] == 'n' && w[6] == 'e') { g_on = 0; g_relay = g_relay_line = 0; g_host = 0; break; }
+        else if ((wl == 4 && w[0] == 'l' && w[1] == 'i' && w[2] == 's' && w[3] == 't') || (wl == 5 && w[0] == 'r' && w[1] == 'e' && w[2] == 'l' && w[3] == 'a' && w[4] == 'y')) {
+            /* relay https://host[/path]; the old "list https://..." (Milestone 98b, players connected directly) now means the relay too */
+            g_on = 1; g_relay = 1; g_relay_line = 1; const char *u = p; if (u[0] == 'h' && u[1] == 't' && u[2] == 't' && u[3] == 'p' && u[4] == 's' && u[5] == ':' && u[6] == '/' && u[7] == '/') u += 8;
             u32 k = 0; while (*u && *u != '/' && *u != ' ' && *u != '\r' && *u != '\n' && k < sizeof g_list_host - 1) g_list_host[k++] = *u++; g_list_host[k] = 0;
             k = 0; while (*u && *u != ' ' && *u != '\r' && *u != '\n' && k < sizeof g_list_path - 1) g_list_path[k++] = *u++; while (k && g_list_path[k - 1] == '/') k--; g_list_path[k] = 0;
             p = u; }
         else if (wl == 4 && w[0] == 'j' && w[1] == 'o' && w[2] == 'i' && w[3] == 'n') {
-            g_on = 1; g_host = 0; g_port = 0; u32 k = 0;
+            g_on = 1; g_host = 0; g_port = 0; g_relay = 0; g_join_set = 1; u32 k = 0;
             while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != ':' && k < sizeof g_join - 1) g_join[k++] = *p++;
             g_join[k] = 0; if (*p == ':') { p++; g_host_port = (u16)parse_num(&p); } }
         else if (wl == 6 && w[0] == 'o' && w[1] == 'n' && w[2] == 'l' && w[3] == 'i' && w[4] == 'n' && w[5] == 'e') {   /* online <server>[:port] */
-            g_on = 1; g_host = 0; g_online = 1; g_port = 0; u32 k = 0;
+            g_on = 1; g_host = 0; g_online = 1; g_port = 0; g_relay = 0; g_join_set = 1; u32 k = 0;
             while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != ':' && k < sizeof g_join - 1) g_join[k++] = *p++;
             g_join[k] = 0; if (*p == ':') { p++; g_host_port = (u16)parse_num(&p); } }
         else if (wl == 8 && w[0] == 'p' && w[1] == 'a' && w[2] == 's' && w[3] == 's' && w[4] == 'w' && w[5] == 'o' && w[6] == 'r' && w[7] == 'd') {   /* password <text>: a private room */
@@ -87,6 +102,10 @@ static void net_config(void) {
             for (int k = 0; k < 3; k++) { int a = hexv(p[0]), b = a >= 0 ? hexv(p[1]) : -1; if (b < 0) break; g_mac[3 + k] = (u8)(a * 16 + b); p += 2; } }
         while (*p && *p != '\n') p++;   /* the rest of the line */
     }
+    /* Milestone 100: the relay is the BFN2 "online" mode against the helper on this PC. A "relay"/"list" line always means it
+       ("host" next to it is not needed and ignored); the server.txt default gives way to an explicit host / join / online line. */
+    if (g_relay_line || (g_relay && !g_join_set && !g_host)) { g_relay = 1; g_on = 1; g_online = 1; g_host = 0; g_force_host = 0; g_list = 0; }
+    else g_relay = 0;
 }
 int net_enabled(void) { net_config(); return g_on; }
 void net_mac(u8 *m) { net_config(); for (int i = 0; i < 6; i++) m[i] = g_mac[i]; }
@@ -119,7 +138,8 @@ static int net_open(void) {
     #undef GP
     static u8 wsa[512]; if (!p_WSAStartup || p_WSAStartup(0x0202, wsa)) { out("  [net] WSAStartup failed\r\n"); return 0; }
     u32 s = p_socket(2, 2, 17); if (s == 0xFFFFFFFF) { out("  [net] socket failed\r\n"); return 0; }
-    SIN me = {2, bswap16(g_port), 0}; if (p_bind(s, &me, sizeof me)) { out("  [net] cannot use UDP port "); dec(g_port); out(" (another program has it?)\r\n"); return 0; }
+    SIN me = {2, bswap16(g_port), g_relay ? 0x0100007F : 0};   /* the relay talks to the helper on this PC only (no firewall question) */
+    if (p_bind(s, &me, sizeof me)) { out("  [net] cannot use UDP port "); dec(g_port); out(" (another program has it?)\r\n"); return 0; }
     u32 one = 1; p_ioctlsocket(s, 0x8004667E /* FIONBIO */, &one);
     { int big = 1 << 20; p_setsockopt(s, 0xFFFF, 0x1002 /* SO_RCVBUF */, &big, 4); p_setsockopt(s, 0xFFFF, 0x1001 /* SO_SNDBUF */, &big, 4); }
     g_sock = s;
@@ -129,6 +149,10 @@ static int net_open(void) {
         out("  [net] online: match list "); out(g_list_host); out(g_room ? ", private room (password)" : ", public room"); out(", UDP port "); dec(g_port);
         if (g_ext_ip) { out(", internet address "); ip_out(g_ext_ip); } out("\r\n");
         return 1; }   /* (the match list is read by bflist.exe, started by net_prestart) */
+    if (g_relay) {   /* Milestone 100: the "server" is the relay helper on this PC (bflist.exe relay, started by net_prestart) */
+        g_peer[0].a.fam = 2; g_peer[0].a.port = bswap16((u16)(g_port - 1)); g_peer[0].a.addr = 0x0100007F; g_peer[0].seen = GetTickCount(); g_npeer = 1;
+        out("  [net] online: relay "); out(g_list_host); out(g_list_path); out(g_room ? ", private room (password)" : ", public room"); out(" - no port forwarding needed\r\n");
+        return 1; }
     if (!g_host) {   /* the host's address: dotted numbers, or a name */
         const char *q = g_join; u32 ip = 0; int dots = 0, ok = 1;
         for (int k = 0; k < 4; k++) { if (!is_digit(*q)) { ok = 0; break; } u32 v = parse_num(&q); if (v > 255) ok = 0; ip |= v << (k * 8); if (k < 3) { if (*q != '.') { ok = 0; break; } q++; dots++; } }
@@ -172,7 +196,16 @@ IMP BOOL WINAPI CreateProcessA(const char *, char *, void *, void *, BOOL, DWORD
 IMP DWORD WINAPI GetCurrentProcessId(void);
 static u32 parse_ip(const char **p);
 void net_prestart(void) {
-    net_config(); if (!g_list) return;
+    net_config();
+    if (g_on && g_relay) {   /* Milestone 100: bflist.exe relay <host> <path or -> <room> <port> <pid> */
+        static char cmd[512]; char *w = cmd; const char *s = "bflist.exe relay "; while (*s) *w++ = *s++;
+        for (s = g_list_host; *s; s++) *w++ = *s; *w++ = ' '; if (g_list_path[0]) { for (s = g_list_path; *s; s++) *w++ = *s; } else *w++ = '-'; *w++ = ' ';
+        num_out(&w, g_room); *w++ = ' '; num_out(&w, g_port); *w++ = ' '; num_out(&w, GetCurrentProcessId()); *w = 0;
+        u32 si[17] = {68}, pi[4];
+        if (CreateProcessA("bflist.exe", cmd, 0, 0, 0, 0x08000000 /* CREATE_NO_WINDOW */, 0, 0, si, pi)) { CloseHandle((HANDLE)pi[0]); CloseHandle((HANDLE)pi[1]); out("  [net] relay helper started (bflist.exe)\r\n"); }
+        else out("  [net] could not start bflist.exe: no online play\r\n");
+        return; }
+    if (!g_list) return;
     { HANDLE f = CreateFileA("external_ip.txt", 0x80000000, 1, 0, 3, 0x80, 0);
       if (f != (HANDLE)-1) { char t[32] = {0}; DWORD n = 0; ReadFile(f, t, 31, &n, 0); CloseHandle(f); const char *q = t; while (*q == ' ') q++; g_ext_ip = parse_ip(&q); } }
     static char cmd[512]; char *w = cmd; const char *s = "bflist.exe "; while (*s) *w++ = *s++;
