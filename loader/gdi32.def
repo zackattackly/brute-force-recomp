@@ -1,0 +1,19 @@
+LIBRARY gdi32.dll
+EXPORTS
+StretchDIBits@52
+SetDIBitsToDevice@48
+ChoosePixelFormat@8
+SetPixelFormat@12
+SwapBuffers@4
+CreateCompatibleDC@4
+CreateDIBSection@24
+SelectObject@8
+CreateFontA@56
+SetTextColor@8
+SetBkMode@8
+GetTextExtentPoint32A@16
+DeleteObject@4
+DeleteDC@4
+TextOutA@20
+TextOutW@20
+GetTextExtentPoint32W@16

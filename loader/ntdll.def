@@ -1,0 +1,9 @@
+LIBRARY ntdll.dll
+EXPORTS
+_alldiv
+_aulldiv
+_allmul
+_allrem
+_aullrem
+NtSetTimerResolution@12
+NtQueryInformationThread@20

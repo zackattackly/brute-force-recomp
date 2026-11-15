@@ -1,0 +1,10 @@
+# The Brute Force online match list (deploy: npx wrangler@4 deploy, from this folder)
+name = "brute-force-list"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "brute-force-list"
+database_id = "1c6fea9d-7da1-4002-b8d4-ab7f149109e0"
