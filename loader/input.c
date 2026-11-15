@@ -495,12 +495,14 @@ __attribute__((naked)) static void move_stub(void) { __asm__ volatile(
     "movl (%esp), %edx\n\t cmpl $0x1332A0, %edx\n\t jb 1f\n\t cmpl $0x1351C0, %edx\n\t jae 1f\n\t movl %ecx, _g_player_char\n\t"
     "cmpl $0, _g_mouse_on\n\t je 1f\n\t pushl %eax\n\t pushl %ecx\n\t pushl %ecx\n\t call _mouse_apply\n\t addl $4, %esp\n\t popl %ecx\n\t popl %eax\n"
     "1:\n\t subl $8, %esp\n\t movl 8(%eax), %edx\n\t pushl $0x11E576\n\t ret"); }
-/* Milestone 105: only characters are taken away from the lock-on and the reticle (that is the aim assist: the pull toward an
-   enemy). Everything else stays: holding X picks up the weapon the reticle / lock is on, and with every target cleared no
-   weapon on the ground could be picked up. */
-static int readable(const void *p, u32 n);
-u32 aim_is_character(u32 t) { if (t < 0x10000 || !readable((void *)(t + 0xC), 4)) return 0; u32 ty = *(u32 *)(t + 0xC); return ty >= 0x10000 && readable((void *)(ty + 4), 4) && *(u32 *)(ty + 4) == 3; }
-u32 aim_reticle_keep(u32 t) { return aim_is_character(t) ? 0 : t; }
+/* Milestone 105: the reticle's object (+0x5E4) is not the enemy: it is one targeting object (type 16, the follow camera's
+   vtable) that drives the lock-on and also picks what holding X picks up. Blanking it always (Milestone 87) made weapons on
+   the ground impossible to pick up; keeping it brought the lock-on back. So it is blanked except while X is held (the
+   pick-up / reload button): then the game sees it as usual and the weapon under the player is picked up. */
+extern u32 g_last_pad[3];
+static int x_held(void) { return ((g_last_pad[1] >> 16) & 255) > 30; }
+u32 aim_is_character(u32 t) { (void)t; return !x_held(); }   /* lock-on: cleared (1) unless X is held */
+u32 aim_reticle_keep(u32 t) { return x_held() ? t : 0; }
 __attribute__((naked)) static void lock_stub1(void) { __asm__ volatile(
     "incl _g_lock_calls\n\t cmpl _g_player_char, %ebx\n\t jne 2f\n\t cmpl $0, _g_mouse_on\n\t je 2f\n\t testl %edi, %edi\n\t jz 2f\n\t"
     "pushal\n\t pushl %edi\n\t call _aim_is_character\n\t addl $4, %esp\n\t testl %eax, %eax\n\t popal\n\t jz 2f\n\t"   /* (popal leaves the flags alone) */

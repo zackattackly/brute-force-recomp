@@ -155,7 +155,9 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   Test aids: menutext.txt (menu_text_log.txt), menulog.txt (menu_mouse_log.txt), menusel.txt.
 - Milestone 105: weapons on the ground could not be picked up (hold X = R). Found by A/B with nogamehooks.txt, then
   aimassist.txt / noweaponhook.txt: the aim-assist removal blanked every lock / reticle target, and pick-up uses the object
-  under the reticle (+0x5E4). Now only characters ([[t+0xC]+4] == 3) are blanked (lock_stub1/2, friction_stub).
+  under the reticle (+0x5E4). +0x5E4 is NOT the enemy: one targeting object (type 16, the follow camera's vtable 0x3A2640)
+  drives both the lock-on and the pick-up choice, so a "characters only" filter brought the lock-on back. Final: lock and
+  reticle targets are blanked while the mouse aims, except while X is held (g_last_pad[1] >> 16 > 30): then pick-up works.
 - Power throttling (bfcore.c): the request with IGNORE_TIMER_RESOLUTION is Windows 11 only; Windows 10 refused the whole
   call ("could not be turned off" on a friend's PC with frame drops and flicker), so it retries with EXECUTION_SPEED alone.
 - Next: weapon poses (bone level), START icon in HUD text draws black.
