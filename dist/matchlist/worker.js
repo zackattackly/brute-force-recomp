@@ -14,22 +14,35 @@
 import { DurableObject } from "cloudflare:workers";
 
 const MAX_ROOM = 64;
+// the rooms' internal names: changing the prefix gives every room a fresh object running the current code (the old public
+// room kept running its first code after a deploy and ignored the round-trip test)
+const ROOM_PREFIX = "r2-";
 const hex6 = (b, o) => { let s = ""; for (let i = 0; i < 6; i++) s += (b[o + i] | 0x100).toString(16).slice(1); return s; };
 
 export class Relay extends DurableObject {
   async fetch(request) {
+    if (new URL(request.url).pathname === "/stats") {   // who is in this room: console address, messages and frames sent, seconds since the last one
+      const now = Date.now(), list = this.ctx.getWebSockets().map(w => { const a = w.deserializeAttachment() || {};
+        return { mac: a.mac || "", msgs: a.n || 0, frames: a.f || 0, connected_s: Math.round((now - (a.t0 || now)) / 1000), last_msg_s: a.tl ? Math.round((now - a.tl) / 1000) : null, last_len: a.len || 0, last_frame: a.last || "" }; });
+      return new Response(JSON.stringify(list, null, 1) + "\n", { headers: { "content-type": "application/json", "cache-control": "no-store" } });
+    }
     if (this.ctx.getWebSockets().length >= MAX_ROOM) return new Response("room full\n", { status: 503 });
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1]);
-    pair[1].serializeAttachment({ mac: "" });
+    pair[1].serializeAttachment({ mac: "", n: 0, f: 0, t0: Date.now(), tl: 0 });
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
   async webSocketMessage(ws, msg) {
     if (typeof msg === "string") return;
-    const b = new Uint8Array(msg);
+    const b = new Uint8Array(msg), att = ws.deserializeAttachment() || {};
+    att.n = (att.n || 0) + 1; att.tl = Date.now(); if (b.length >= 14) att.f = (att.f || 0) + 1;
+    if (b.length >= 14) { att.mac = hex6(b, 6); att.last = Array.from(b.subarray(0, Math.min(48, b.length)), x => (x | 0x100).toString(16).slice(1)).join(" "); att.len = b.length; }   // learn which console is on this connection; the latest frame's start (for /stats)
+    ws.serializeAttachment(att);
+    if (b.length === 4 && b[0] === 0x50 && b[1] === 0x49 && b[2] === 0x4E && b[3] === 0x47) {   // "PING": the helper's round-trip test
+      try { ws.send(new Uint8Array([0x50, 0x4F, 0x4E, 0x47])); } catch (e) {}                  // "PONG"
+      return;
+    }
     if (b.length < 14) return;                                   // keep-alive
-    const src = hex6(b, 6), att = ws.deserializeAttachment() || {};
-    if (att.mac !== src) ws.serializeAttachment({ mac: src });   // learn which console is on this connection
     const all = this.ctx.getWebSockets();
     let to = null;
     if (!(b[0] & 1)) { const dst = hex6(b, 0); to = all.find(w => w !== ws && (w.deserializeAttachment() || {}).mac === dst) || null; }
@@ -88,7 +101,12 @@ export default {
       const room = num(url.searchParams.get("room"), 0, 4294967295);
       if (room === null) return text("bad request\n", 400);
       if (request.headers.get("Upgrade") !== "websocket") return text("websocket expected\n", 426);
-      return env.RELAY.get(env.RELAY.idFromName("room-" + room)).fetch(request);
+      return env.RELAY.get(env.RELAY.idFromName(ROOM_PREFIX + room)).fetch(request);
+    }
+    if (url.pathname === "/stats") {   // the live state of a relay room (for testing): GET /stats?room=0
+      const room = num(url.searchParams.get("room"), 0, 4294967295);
+      if (room === null) return text("bad request\n", 400);
+      return env.RELAY.get(env.RELAY.idFromName(ROOM_PREFIX + room)).fetch(new Request("https://relay/stats"));
     }
     if (url.pathname === "/list") {
       const room = num(url.searchParams.get("room"), 0, 4294967295);

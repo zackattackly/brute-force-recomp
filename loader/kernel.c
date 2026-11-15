@@ -219,7 +219,19 @@ static void NTAPI MmFreeContiguousMemory(void *p) {
     g_plock = 0;
 }
 static void NTAPI MmPersistContiguousMemory(void *p, u32 n, u8 persist) { }
-static u32 NTAPI MmGetPhysicalAddress(void *p) { return (u32)p >= POOL && (u32)p < 0x84000000 ? (u32)p - POOL : (u32)p; }
+/* Memory outside the pool has no physical address of its own: its own address is returned. Devices that use these numbers
+   (the network chip, net.c) must then read that memory directly, not the pool at that offset: the pages handed out this way
+   are remembered (Milestone 104: the game's network buffers live outside the pool; the chip copied zeros from the pool at
+   the same offset, so every packet sent and received was empty). */
+#define NPPAGE 4096
+static u32 g_ppage[NPPAGE], g_nppage; static volatile u32 g_pplock;
+static u32 NTAPI MmGetPhysicalAddress(void *p) {
+    u32 a = (u32)p; if (a >= POOL && a < 0x84000000) return a - POOL;
+    u32 pg = a & ~0xFFFu; while (__sync_lock_test_and_set(&g_pplock, 1)) ;
+    u32 i = 0; for (; i < g_nppage && g_ppage[i] != pg; i++) ; if (i == g_nppage && g_nppage < NPPAGE) g_ppage[g_nppage++] = pg;
+    __sync_lock_release(&g_pplock); return a; }
+int phys_is_direct(u32 a) {   /* was this "physical" address handed out for memory outside the pool? (then it is the memory's own address) */
+    u32 pg = a & ~0xFFFu; for (u32 i = 0; i < g_nppage; i++) if (g_ppage[i] == pg) return 1; return 0; }
 static u32 NTAPI MmQueryAllocationSize(void *p) { u32 s = pool_size((u32)p); if (s) return s; u32 m[7]; return VirtualQuery(p, m, 28) ? m[3] : 0; }
 static void *NTAPI MmAllocateSystemMemory(u32 n, u32 prot) { return VirtualAlloc(0, n, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE); }
 static u32 NTAPI MmFreeSystemMemory(void *p, u32 n) { VirtualFree(p, 0, MEM_RELEASE); return n; }

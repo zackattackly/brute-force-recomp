@@ -122,6 +122,16 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   THE real cause on the friend's PC: 41 days of uptime. GetTickCount above 2^31 (24.8 days) makes (int)(now - 0) negative;
   the helper's "time to connect" (tryat = 0) was never true. Never compare ticks signed against a value that may be 0: start
   timers at GetTickCount() or test for 0 first (fixed in bflist.c, net.c is_hosting, dsound.c g_rz_mute).
+  After that fix the friend's helper said "relay connected" but none of its frames reached the room. Round-trip test: the
+  worker answers a 4-byte "PING" with "PONG"; relay_log.txt says "relay round trip ok (N ms)" or "FAILED: no answer in 6 s";
+  "relay data: sent N, received M (send errors)" every 30 s. To test the room from here: a .NET ClientWebSocket on
+  wss://.../relay?room=0 hears every broadcast (my game's "received" count went up from test frames).
+- Milestone 104: THE online bug: every System Link frame was all zeros. The game's NIC buffers live outside the 64 MB pool
+  (e.g. 0x00B84E2E, from NtAllocateVirtualMemory); MmGetPhysicalAddress returns such addresses unchanged and net.c read
+  0x80000000 + address (zeros) and wrote received frames there. kernel.c now remembers the pages it handed out unchanged
+  (phys_is_direct) and net.c PHYS() uses them directly. [frame] log lines show the first 24 frames sent/dropped.
+  Live room view: https://brute-force-list.zacharyhill1234.workers.dev/stats?room=0 (connections, frames, last frame bytes;
+  room objects keep their code until everyone disconnects - ROOM_PREFIX in worker.js gives fresh rooms).
   Original (unpatched) default.xbe: the start-up disc authentication is skipped in memory (jge -> jmp at 0x2F8257).
   The in-game widescreen widening is off by default (wide.txt): it made the view pull back further after each sprint.
 - Milestone 101 (hit marker): hitmarker.wav (from the user's clip) plays when the player's shot hits a character. Hook on the

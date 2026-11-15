@@ -57,7 +57,7 @@ K32 BOOL WINAPI CloseHandle(HANDLE);
 static BOOL (WINAPI *w_option)(void *, u32, void *, u32); static void *(WINAPI *w_upgrade)(void *, u32);
 static u32 (WINAPI *w_wsend)(void *, u32, void *, u32); static u32 (WINAPI *w_wrecv)(void *, void *, u32, u32 *, u32 *); static u32 (WINAPI *w_wclose)(void *, u16, void *, u32);
 static int (WINAPI *p_select)(int, void *, void *, void *, const s32 *);
-static volatile void *g_ws; static volatile u32 g_wlock, g_rx, g_tx, g_room, g_sock; static SIN g_loader;
+static volatile void *g_ws; static volatile u32 g_wlock, g_rx, g_tx, g_room, g_sock, g_txerr, g_ping_t, g_pong; static SIN g_loader;
 static void wl(void) { while (__sync_lock_test_and_set(&g_wlock, 1)) Sleep(0); } static void wu(void) { __sync_lock_release(&g_wlock); }
 static void logl(const char *s) {   /* relay_log.txt next to the game: connects and disconnects only */
     HANDLE f = CreateFileA("relay_log.txt", 0x04 /* FILE_APPEND_DATA */, 1, 0, 4 /* OPEN_ALWAYS */, 0x80, 0); if (f == (HANDLE)-1) return;
@@ -99,6 +99,8 @@ static u32 WINAPI rx_thread(void *unused) {   /* relay -> loader */
         u32 n = 0, type = 0; u32 e = w_wrecv(ws, b + 8, sizeof b - 8, &n, &type);
         if (e == 12002 /* ERROR_WINHTTP_TIMEOUT: a quiet room, not a lost connection */) continue;
         if (e || type == 4 /* close */) { wl(); if (g_ws == ws) { g_ws = 0; w_close(ws); logl("relay connection lost"); } wu(); continue; }
+        if (type == 0 && n == 4 && b[8] == 'P' && b[9] == 'O' && b[10] == 'N' && b[11] == 'G') {   /* the answer to our round-trip test */
+            if (!g_pong && g_ping_t) { g_pong = 1; char t[96], *w = t; put(&w, "relay round trip ok ("); putn(&w, GetTickCount() - g_ping_t); put(&w, " ms): data flows both ways"); *w = 0; logl(t); } continue; }
         if (type == 0 /* a whole binary message */ && n >= 14) { *(u32 *)b = 0x324E4642; *(u32 *)(b + 4) = g_room; p_sendto(g_sock, b, (int)n + 8, 0, &g_loader, sizeof g_loader); g_rx++; } }
     return 0; }
 static void relay_main(HANDLE parent, u32 room, u32 port) {
@@ -110,20 +112,27 @@ static void relay_main(HANDLE parent, u32 room, u32 port) {
     g_sock = s; SIN ld = {2, bswap16((u16)port), 0x0100007F}; g_loader = ld;
     u32 tid; CreateThread(0, 0, rx_thread, 0, 0, &tid); CreateThread(0, 0, watchdog, 0, 0, &tid);
     static u8 b[2048]; u32 heard = GetTickCount(), tryat = heard, ka = 0, fails = 0;   /* (tryat = now, not 0: (int)(now - 0) is negative once a PC has been on for 24.8 days - it never tried to connect) */
-    logl("relay helper started (version 2026-11-15c)");
+    logl("relay helper started (version 2026-11-15d)");
     for (;;) {
         if (parent && WaitForSingleObject(parent, 0) == 0) break;   /* the game ended */
         u32 now = GetTickCount();
         if (now - heard > 20000) break;                             /* no word from the loader for 20 s */
         if (!g_ws && (int)(now - tryat) >= 0) { void *ws = ws_connect();
-            if (ws) { wl(); g_ws = ws; wu(); fails = 0; logl("relay connected"); }
+            if (ws) { wl(); g_ws = ws; wu(); fails = 0; logl("relay connected");
+                /* round-trip test: the relay answers "PING" with "PONG". A PC whose connection opens but whose data never
+                   arrives (something between it and Cloudflare inspecting the traffic) shows no answer here */
+                static u8 ping[4] = {'P', 'I', 'N', 'G'}; g_pong = 0; g_ping_t = GetTickCount() | 1; wl(); if (g_ws) w_wsend((void *)g_ws, 0, ping, 4); wu(); }
             else { fails++; tryat = now + (fails < 5 ? 1000 : 5000); if (fails <= 3 || fails % 12 == 0) logl(g_fail[0] ? g_fail : "relay connect failed (retrying)"); } }
         struct { u32 n; u32 s[1]; } rd = {1, {s}}; s32 tv[2] = {0, 50000};
         if (p_select(0, &rd, 0, 0, tv) > 0) for (int k = 0; k < 64; k++) {
             SIN f; int fl = sizeof f; int n = p_recvfrom(s, b, sizeof b, 0, &f, &fl);
             if (n < 8 || *(u32 *)b != 0x324E4642) break;
             heard = GetTickCount();
-            if (n >= 8 + 14) { wl(); void *ws = (void *)g_ws; if (ws && w_wsend(ws, 0 /* binary message */, b + 8, (u32)n - 8) == 0) g_tx++; wu(); } }
+            if (n >= 8 + 14) { wl(); void *ws = (void *)g_ws; if (ws) { if (w_wsend(ws, 0 /* binary message */, b + 8, (u32)n - 8) == 0) g_tx++; else g_txerr++; } wu(); } }
+        if (g_ping_t && !g_pong && (s32)(GetTickCount() - g_ping_t) > 6000) {   /* (the time now: `now` was read before connecting) */ g_ping_t = 0; logl("relay round trip FAILED: no answer in 6 s - connected, but data does not get through (antivirus web protection, a VPN or a firewall?)"); }
+        {   static u32 tst, lrx = 0xFFFFFFFF, ltx = 0xFFFFFFFF, lerr; if (now - tst > 30000) { tst = now;   /* every 30 s while the numbers change: game data to and from the relay */
+                if (g_rx != lrx || g_tx != ltx || g_txerr != lerr) { lrx = g_rx; ltx = g_tx; lerr = g_txerr; char t[120], *w = t; put(&w, "relay data: sent "); putn(&w, g_tx); put(&w, ", received "); putn(&w, g_rx);
+                    if (g_txerr) { put(&w, ", send errors "); putn(&w, g_txerr); } *w = 0; logl(t); } } }
         if (g_ws && now - ka > 20000) { ka = now; static u8 z[1]; wl(); if (g_ws) w_wsend((void *)g_ws, 0, z, 1); wu(); }   /* keep the connection warm */
     }
     /* no WebSocket close handshake: WinHttpWebSocketClose waits for the server's reply, which the receive thread would take

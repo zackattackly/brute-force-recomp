@@ -19,7 +19,10 @@ IMP DWORD WINAPI GetFileAttributesA(const char *);
 IMP void *WINAPI LoadLibraryA(const char *);
 IMP void *WINAPI GetProcAddress(void *, const char *);
 
-#define PHYS(pa) ((u8 *)(0x80000000u + ((pa) & 0x03FFFFFF)))
+/* a "physical" address the game gave the chip -> where its bytes are: memory outside the pool was handed out under its own address
+   (kernel.c MmGetPhysicalAddress remembers those pages); everything else is in the pool at 0x80000000 + the address */
+int phys_is_direct(u32 a);
+#define PHYS(pa) (phys_is_direct((u32)(pa)) ? (u8 *)(u32)(pa) : (u8 *)(0x80000000u + ((pa) & 0x03FFFFFF)))
 #define NET_PORT 34567
 #define MAGIC 0x314E4642   /* "BFN1" */
 
@@ -253,8 +256,11 @@ static u32 g_log_n;
 static void reg_log(const char *what, u32 off, u32 v) { if (g_log_n < 400) { g_log_n++; out("  [nic] "); out(what); out(" "); hex(off); out(" "); hex(v); out("\r\n"); } }
 
 static void deliver_local(const u8 *f, u32 len);
+static void frame_log(const char *what, const u8 *f, u32 len) {   /* the first bytes of a frame -> the log (the first few only) */
+    static u32 n; if (n >= 24) return; n++; static const char hx[] = "0123456789ABCDEF"; out("  [frame] "); out(what); out(" len "); dec(len); out(":");
+    for (u32 i = 0; i < len && i < 40; i++) { char b[4] = {' ', hx[f[i] >> 4], hx[f[i] & 15], 0}; out(b); } out("\r\n"); }
 static void tx_frame(const u8 *f, u32 len) {
-    g_tx_frames++;
+    g_tx_frames++; frame_log("sent", f, len);
     if (!net_open()) return;
     if (g_list) {
         if (len >= 14 && !(f[0] & 1)) {   /* a frame to one console that searched lately: we answered a search, so we host */
@@ -291,10 +297,10 @@ static void rx_frame(const u8 *f, u32 len) {   /* into the game's receive ring (
 }
 static void deliver_local(const u8 *f, u32 len) {
     if (len < 14) return;
-    { int own = 1; for (int k = 0; k < 6; k++) if (f[6 + k] != g_mac[k]) own = 0; if (own) return; }   /* our own frame come back (we can be in our own list) */
+    { int own = 1; for (int k = 0; k < 6; k++) if (f[6 + k] != g_mac[k]) own = 0; if (own) { frame_log("dropped (our own)", f, len); return; } }   /* our own frame come back (we can be in our own list) */
     if (f[0] & 1) { u32 i = g_bci++ & 7; for (int k = 0; k < 6; k++) g_bc[i].m[k] = f[6 + k]; g_bc[i].t = GetTickCount() | 1; }   /* someone broadcast (a search) */
     int mine = (f[0] & 1); if (!mine) { mine = 1; for (int k = 0; k < 6; k++) if (f[k] != g_mac[k]) mine = 0; }   /* broadcast / multicast, or to this console */
-    if (!mine) return;
+    if (!mine) { frame_log("dropped (not to this console)", f, len); return; }
     lock(); rx_frame(f, len); unlock();
 }
 
