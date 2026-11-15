@@ -552,7 +552,30 @@ static void cam_build(u8 *cam) {
                 u32 a[9] = {world, (u32)&hd, (u32)hp, (u32)hn, (u32)st2, (u32)dv, (u32)filt, *(u32 *)&range, 0};   /* a1 .. a9 */
                 __asm__ volatile("pushl 32(%%esi)\n\t pushl 28(%%esi)\n\t pushl 24(%%esi)\n\t pushl 20(%%esi)\n\t pushl 16(%%esi)\n\t pushl 12(%%esi)\n\t pushl 8(%%esi)\n\t pushl 4(%%esi)\n\t pushl 0(%%esi)\n\t"
                     "xorl %%eax, %%eax\n\t movl $0xDDD10, %%ecx\n\t call *%%ecx" : "=a"(hit) : "S"(a) : "ecx", "edx", "memory", "cc"); }
-            { static u32 tl2; u32 nw2 = GetTickCount(); if (nw2 - tl2 > 2000) { tl2 = nw2; out("  [camray] world "); hex(world); out(" ignore "); hex(*(u32 *)(filt + 0x118)); out(" len "); fo(L); out("ret "); hex(hit); out(" out d "); fo(hd); out("pt "); fo(hp[0]); fo(hp[1]); fo(hp[2]); out("start "); fo(st[0]); fo(st[1]); fo(st[2]); out("dir "); fo(dv[0]); fo(dv[1]); fo(dv[2]); out("\r\n"); } }
+            u32 rhit = 0; float rhd = 0;   /* probe: the same segment cast backwards (eye -> pivot): one-sided walls? */
+            if (world > 0x10000 && world < 0x7FFE0000u) { float rp[3], rn[3], rs[3] = {eye[0] + dv[0] * 0.3f, eye[1] + dv[1] * 0.3f, eye[2] + dv[2] * 0.3f}, rd[3] = {-dv[0], -dv[1], -dv[2]}, rr = L - 0.2f;
+                u32 a[9] = {world, (u32)&rhd, (u32)rp, (u32)rn, (u32)rs, (u32)rd, (u32)filt, *(u32 *)&rr, 0};
+                __asm__ volatile("pushl 32(%%esi)\n\t pushl 28(%%esi)\n\t pushl 24(%%esi)\n\t pushl 20(%%esi)\n\t pushl 16(%%esi)\n\t pushl 12(%%esi)\n\t pushl 8(%%esi)\n\t pushl 4(%%esi)\n\t pushl 0(%%esi)\n\t"
+                    "xorl %%eax, %%eax\n\t movl $0xDDD10, %%ecx\n\t call *%%ecx" : "=a"(rhit) : "S"(a) : "ecx", "edx", "memory", "cc"); }
+            {   /* probe: does the game's own follow camera (it runs first, starting from our last eye) pull its eye in at walls? */
+                u8 *cam_block(u8 *); u8 *blk = cam_block(cam); float gd = -1, gm = -1;
+                if (blk && readable(blk + 0x238, 12)) { float *ge = (float *)(blk + 0x238), q[3] = {ge[0] - st[0], ge[1] - st[1], ge[2] - st[2]}, m[3] = {ge[0] - g_eye_ours[0], ge[1] - g_eye_ours[1], ge[2] - g_eye_ours[2]};
+                    float s2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2], m2 = m[0] * m[0] + m[1] * m[1] + m[2] * m[2]; __asm__("fsqrt" : "=t"(gd) : "0"(s2)); __asm__("fsqrt" : "=t"(gm) : "0"(m2)); }
+                static u32 tl2; u32 nw2 = GetTickCount(); if (nw2 - tl2 > 1000 || ((hit || rhit) && nw2 - tl2 > 250)) { tl2 = nw2; out("  [camray] len "); fo(L); out("fwd "); hex(hit); out(" d "); fo(hd); out("back "); hex(rhit); out(" d "); fo(rhd);
+                    out("game eye dist "); fo(gd); out("moved "); fo(gm); out("pos "); fo(st[0]); fo(st[1]); fo(st[2]); out("\r\n"); } }
+            {   /* probe: a ray straight ahead (camera forward, 60 m, from 1 m in front of the pivot) and one straight down (control: the ground hit before) */
+                static u32 tl3; u32 nw3 = GetTickCount();
+                if (nw3 - tl3 > 1000 && world > 0x10000 && world < 0x7FFE0000u) { tl3 = nw3; u32 fh = 0, dh = 0; float fd = 0, dd = 0, p1[3], n1[3];
+                    float fs[3] = {st[0] - b[0] * 1.0f, st[1] - b[1] * 1.0f, st[2] - b[2] * 1.0f}, fdir[3] = {-b[0], -b[1], -b[2]}, fr = 60.0f;
+                    u32 a[9] = {world, (u32)&fd, (u32)p1, (u32)n1, (u32)fs, (u32)fdir, (u32)filt, *(u32 *)&fr, 0};
+                    __asm__ volatile("pushl 32(%%esi)\n\t pushl 28(%%esi)\n\t pushl 24(%%esi)\n\t pushl 20(%%esi)\n\t pushl 16(%%esi)\n\t pushl 12(%%esi)\n\t pushl 8(%%esi)\n\t pushl 4(%%esi)\n\t pushl 0(%%esi)\n\t"
+                        "xorl %%eax, %%eax\n\t movl $0xDDD10, %%ecx\n\t call *%%ecx" : "=a"(fh) : "S"(a) : "ecx", "edx", "memory", "cc");
+                    float ds[3] = {fs[0], fs[1], fs[2]}, ddir[3] = {0, -1, 0}, dr = 20.0f;
+                    u32 a2[9] = {world, (u32)&dd, (u32)p1, (u32)n1, (u32)ds, (u32)ddir, (u32)filt, *(u32 *)&dr, 0};
+                    __asm__ volatile("pushl 32(%%esi)\n\t pushl 28(%%esi)\n\t pushl 24(%%esi)\n\t pushl 20(%%esi)\n\t pushl 16(%%esi)\n\t pushl 12(%%esi)\n\t pushl 8(%%esi)\n\t pushl 4(%%esi)\n\t pushl 0(%%esi)\n\t"
+                        "xorl %%eax, %%eax\n\t movl $0xDDD10, %%ecx\n\t call *%%ecx" : "=a"(dh) : "S"(a2) : "ecx", "edx", "memory", "cc");
+                    u32 *pd = gpu_pad(); out("  [camfwd] ahead "); hex(fh); out(" d "); fo(fd); out("down "); hex(dh); out(" d "); fo(dd); out("reticle depth raw "); hex(pd ? pd[50] : 0); out("\r\n"); } }
+            if (!hit && rhit) { hit = rhit; hd = (L + 0.3f - rhd) - 0.5f; if (hd < 0) hd = 0; }   /* a back hit rhd from its start (0.3 m past the eye): as a distance from the forward start (0.5 m out) */
             float want = L; if (hit) { float hl = 0.5f + hd; want = hl - 0.3f;   /* hd: distance from the ray start */ if (want < 0.35f) want = 0.35f; if (want > L) want = L; }
             if (cur_d < 0 || want < cur_d) cur_d = want; else { float e2 = dt * 4.0f; if (e2 > 1) e2 = 1; cur_d += (want - cur_d) * e2; }
             for (int k = 0; k < 3; k++) eye[k] = st[k] + dv[k] * cur_d;
@@ -615,7 +638,9 @@ void node_get_log(u32 ret) { seq_add(ret); for (u32 k = 0; k < g_ng_n; k++) if (
 __attribute__((naked)) static void node_get_stub(void) { __asm__ volatile(
     "pushal\n\t pushl 32(%esp)\n\t call _node_get_log\n\t addl $4, %esp\n\t popal\n\t jmp *_g_node_get_orig"); }
 int cam_skip(u8 *cam);
+u8 *g_cam_obj;   /* the player's camera object (for the field-of-view probe) */
 void cam_after(u8 *cam) {
+    if (g_player_char && *(u8 **)(cam + 0x148) == (u8 *)g_player_char) g_cam_obj = cam;
     {   static u32 done; if (!done && GetFileAttributesA("cullfind.txt") != 0xFFFFFFFF) { done = 1; u32 *vt = *(u32 **)(cam + 0x48); DWORD op;
             IMP BOOL WINAPI VirtualProtect(void *, u32, DWORD, DWORD *); VirtualProtect(&vt[5], 4, 0x40, &op); g_node_get_orig = vt[5]; vt[5] = (u32)node_get_stub; out("  [nodeget] wrapped vtable "); hex((u32)vt); out("\r\n"); } }
     {   /* follow-camera lag probe (camlag.txt): angle between the game's camera (node, before we rebuild it) and the
@@ -867,7 +892,13 @@ void vp_watch(const float *M) {
     float V[16], iV[16]; our_view(V); if (!inv4(V, iV)) return;
     u32 nb = (g_proj_i + 1) & 1; float *pm = g_projB[nb];
     for (int r = 0; r < 4; r++) for (int cc = 0; cc < 4; cc++) { float a = 0; for (int k = 0; k < 4; k++) a += M[r * 4 + k] * iV[k * 4 + cc]; pm[r * 4 + cc] = a; }
-    g_proj_i = nb; g_proj_t = GetTickCount() | 1; }
+    g_proj_i = nb; g_proj_t = GetTickCount() | 1;
+    {   /* probe: the projection's field of view over time (the view seemed to pull back after sprinting): P[0][0], P[1][1] and the
+           camera object's floats that look like an angle (0.2 .. 3 rad) or a zoom, logged when P[1][1] changes by 2% */
+        extern u8 *g_cam_obj; extern u32 g_sprinting; static float lp; static u32 n; float p11 = pm[5] < 0 ? -pm[5] : pm[5];
+        if (n < 400 && (lp == 0 || p11 > lp * 1.02f || p11 < lp * 0.98f)) { n++; lp = p11; out("  [fov] P00 "); fo(pm[0]); out("P11 "); fo(pm[5]); out("sprint "); dec(g_sprinting);
+            if (g_cam_obj && readable(g_cam_obj, 0x400)) { out(" cam"); for (u32 o = 0; o < 0x400; o += 4) { float f = *(float *)(g_cam_obj + o); if (f > 0.2f && f < 3.2f) { out(" +"); hex(o); out("="); fo(f); } } }
+            out("\r\n"); } } }
 static u32 g_rng = 12345; static float frand(void) { g_rng = g_rng * 1664525u + 1013904223u; return (float)(g_rng >> 8) / 16777216.0f; }
 static float sqrt_(float x) { float r; __asm__("fsqrt" : "=t"(r) : "0"(x)); return r; }
 static float sin_(float x) { float r; __asm__("fsin" : "=t"(r) : "0"(x)); return r; }
@@ -1707,9 +1738,37 @@ void cam_widen(u8 *pr) {
     if (lh[k] > 0 && d1 > -1e-5f && d1 < 1e-5f && d3 > -1e-5f && d3 < 1e-5f) return;                 /* still what we set */
     if (lh[k] > 0 && d1 > -1e-5f && d1 < 1e-5f && d2 > -1e-5f && d2 < 1e-5f) { *v = lv[k]; return; } /* the game recomputed +0x28 from our +0x24: put it back */
     if (*v > 0.0001f) { float r = *h / *v; if (r > 1.32f && r < 1.345f) { *h = *v * g_aspect; lh[k] = *h; lv[k] = *v; } } }
+/* Milestone 99 fix: the widening above stayed in the game's camera object, and the game's sprint zoom scales the value it finds
+   there: each sprint multiplied the view by another 4:3 -> 16:9 step (the view kept pulling further back). Now +0x24 is widened
+   only while 0x6AB30 / 0x6AD00 run (both end in a plain ret): the caller's return address is swapped for widen_after, which puts
+   the game's own value back. oldwide.txt = the old persistent widening. */
+static u32 g_wret[16]; static u8 *g_wobj[16]; static float g_wsave[16], g_wset[16]; static u32 g_wd;
+void widen_begin(u8 *pr, u32 ret) {
+    u32 d = g_wd < 16 ? g_wd : 15; g_wret[d] = ret; g_wobj[d] = 0;
+    if (g_aspect == 0) cam_widen((u8 *)0);   /* reads aspect.txt once (and returns: no object) */
+    if (readable(pr + 0x24, 8) && g_aspect > 1.34f) { float *h = (float *)(pr + 0x24), *v = (float *)(pr + 0x28);
+        if (*v > 0.0001f) { float r = *h / *v; if (r > 1.32f && r < 1.345f) { g_wobj[d] = pr; g_wsave[d] = *h; *h = *v * g_aspect; g_wset[d] = *h; } }
+        {   static u8 *lo[8]; static float lh[8]; static u32 tl, nl; u32 k = 0; while (k < 8 && lo[k] && lo[k] != pr) k++; if (k == 8) k = 0;
+            float hv = g_wobj[d] ? g_wsave[d] : *h; u32 now = GetTickCount();
+            if (nl < 300 && (lo[k] != pr || hv > lh[k] * 1.01f || hv < lh[k] * 0.99f || now - tl > 5000)) { nl++; tl = now; lo[k] = pr; lh[k] = hv;
+                out("  [widen] obj "); hex((u32)pr); out(" ret "); hex(ret); out(" depth "); dec(g_wd); out(" h "); fo(hv); out("v "); fo(*v); out("aspect +2c "); fo(v[1]); out(g_wobj[d] ? "widened to " : "left "); fo(*h); out("\r\n"); } } }
+    if (g_wd < 16) g_wd++; }
+u32 widen_end(void) { if (g_wd) g_wd--; u32 d = g_wd;
+    { static u32 n; if (n < 12 && g_wobj[d]) { n++; out("  [widen-end] obj "); hex((u32)g_wobj[d]); out(" h now "); fo(*(float *)(g_wobj[d] + 0x24)); out("set "); fo(g_wset[d]); out("saved "); fo(g_wsave[d]); out("ret "); hex(g_wret[d]); out("\r\n"); } }
+    if (g_wobj[d] && readable(g_wobj[d] + 0x24, 4)) { float *h = (float *)(g_wobj[d] + 0x24); u32 a = *(u32 *)h, b = *(u32 *)&g_wset[d]; if (a == b) *h = g_wsave[d];
+        { static u32 n; if (n < 12) { n++; out("  [widen-end2] bits "); hex(a); out(" vs "); hex(b); out(" after "); fo(*h); out("\r\n"); } } }
+    return g_wret[d]; }
+__attribute__((naked)) void widen_after(void) { __asm__ volatile(
+    "pushl $0\n\t pushal\n\t call _widen_end\n\t movl %eax, 32(%esp)\n\t popal\n\t ret"); }   /* returns to the game's caller */
 __attribute__((naked)) static void widen_stub1(void) { __asm__ volatile(   /* 0x6AB30: sub esp,0xc; test ecx,ecx */
-    "pushal\n\t pushl %eax\n\t call _cam_widen\n\t addl $4, %esp\n\t popal\n\t subl $0xc, %esp\n\t testl %ecx, %ecx\n\t pushl $0x6AB35\n\t ret"); }
+    "pushal\n\t pushl 32(%esp)\n\t pushl %eax\n\t call _widen_begin\n\t addl $8, %esp\n\t popal\n\t movl $_widen_after, (%esp)\n\t"
+    "subl $0xc, %esp\n\t testl %ecx, %ecx\n\t pushl $0x6AB35\n\t ret"); }
 __attribute__((naked)) static void widen_stub2(void) { __asm__ volatile(   /* 0x6AD00: sub esp,0xc; fld dword [eax+0x24] */
+    "pushal\n\t pushl 32(%esp)\n\t pushl %eax\n\t call _widen_begin\n\t addl $8, %esp\n\t popal\n\t movl $_widen_after, (%esp)\n\t"
+    "subl $0xc, %esp\n\t flds 0x24(%eax)\n\t pushl $0x6AD06\n\t ret"); }
+__attribute__((naked)) static void widen_old1(void) { __asm__ volatile(
+    "pushal\n\t pushl %eax\n\t call _cam_widen\n\t addl $4, %esp\n\t popal\n\t subl $0xc, %esp\n\t testl %ecx, %ecx\n\t pushl $0x6AB35\n\t ret"); }
+__attribute__((naked)) static void widen_old2(void) { __asm__ volatile(
     "pushal\n\t pushl %eax\n\t call _cam_widen\n\t addl $4, %esp\n\t popal\n\t subl $0xc, %esp\n\t flds 0x24(%eax)\n\t pushl $0x6AD06\n\t ret"); }
 void hs_fix(u32 *s) { aim_fix((u8 *)s[1], (float *)s[3], (float *)s[4]); }
 __attribute__((naked)) static void hs_stub(void) { __asm__ volatile(
@@ -1737,7 +1796,15 @@ void input_patch(void) {
         if (ok) { p[0] = 0xE9; *(u32 *)(p + 1) = (u32)bone_stub - (0x95460 + 5); for (int k = 5; k < 9; k++) p[k] = 0x90; out("Bone probe: on\r\n"); } else out("Bone probe: bytes differ\r\n"); }
     {   static const u8 e1[5] = {0x83, 0xEC, 0x0C, 0x85, 0xC9}, e2[6] = {0x83, 0xEC, 0x0C, 0xD9, 0x40, 0x24}; u8 *p1 = (u8 *)0x6AB30, *p2 = (u8 *)0x6AD00; int ok = 1;
         for (int k = 0; k < 5; k++) if (p1[k] != e1[k]) ok = 0; for (int k = 0; k < 6; k++) if (p2[k] != e2[k]) ok = 0;
-        if (ok) { p1[0] = 0xE9; *(u32 *)(p1 + 1) = (u32)widen_stub1 - (0x6AB30 + 5); p2[0] = 0xE9; *(u32 *)(p2 + 1) = (u32)widen_stub2 - (0x6AD00 + 5); p2[5] = 0x90; out("Widescreen camera hooks: on\r\n"); } else out("Widescreen camera hooks: bytes differ\r\n"); }
+        /* Milestone 99: the in-game widening is OFF by default - with it the view kept pulling further back after sprinting (an A/B run
+           with it off fixed that). wide.txt = culling-only widening + the viewer's squeeze; oldwide.txt = the Milestone 96 widening. */
+        if (GetFileAttributesA("wide.txt") == 0xFFFFFFFF && GetFileAttributesA("oldwide.txt") == 0xFFFFFFFF) { out("Widescreen camera hooks: off (wide.txt turns them on)\r\n"); ok = 0; p1 = p2 = 0; }
+        int old = GetFileAttributesA("oldwide.txt") != 0xFFFFFFFF; u32 s1 = old ? (u32)widen_old1 : (u32)widen_stub1, s2 = old ? (u32)widen_old2 : (u32)widen_stub2;
+        /* Milestone 99: by default only the culling planes (0x6AD00) are widened, and only while they are built; the projection
+           (0x6AB30) stays the game's 4:3 one and the viewer squeezes the 3D scene horizontally (bfgl.c). The game copied the widened
+           projection back into its own field of view, which compounded with the sprint zoom (the view kept pulling back). */
+        if (ok && !old) { p2[0] = 0xE9; *(u32 *)(p2 + 1) = s2 - (0x6AD00 + 5); p2[5] = 0x90; out("Widescreen culling hook: on (projection left 4:3, squeezed by the viewer)\r\n"); ok = 0; p1 = 0; }
+        if (ok) { p1[0] = 0xE9; *(u32 *)(p1 + 1) = s1 - (0x6AB30 + 5); p2[0] = 0xE9; *(u32 *)(p2 + 1) = s2 - (0x6AD00 + 5); p2[5] = 0x90; out("Widescreen camera hooks: on\r\n"); } else if (p1) out("Widescreen camera hooks: bytes differ\r\n"); }
     {   u8 *p = (u8 *)0x11D7F7; static const u8 e[10] = {0x8B, 0x74, 0x24, 0x0C, 0xD9, 0x86, 0xA0, 0x04, 0x00, 0x00}; int ok = 1; for (int k = 0; k < 10; k++) if (p[k] != e[k]) ok = 0;
         if (ok) { p[0] = 0xE9; *(u32 *)(p + 1) = (u32)body_stub - (0x11D7F7 + 5); for (int k = 5; k < 10; k++) p[k] = 0x90; out("Body turn hook: on\r\n"); } else out("Body turn hook: bytes differ\r\n"); }
     if (GetFileAttributesA("vsclog.txt") != 0xFFFFFFFF) { static const u8 e[6] = {0x56, 0x57, 0x8B, 0x3D, 0x40, 0xBD}; if (hook6(0x36F6C0, vsc_stub, e)) out("VS constant probe: on\r\n"); }

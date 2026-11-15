@@ -1278,7 +1278,8 @@ static void present_tex(GLuint tex, u32 w, u32 h) {
     s32 dw = cw, dh = ch, dx = 0, dy = 0;
     {   /* the squeeze in the shaders is off: it left the game's own 4:3 view filling only the middle of the screen (its culling
            is 4:3). Widescreen is done in the game's camera instead (input.c cam_widen). shaderwide.txt = this squeeze again. */
-        static u32 tw, sw; if (now - tw > 1000) { tw = now; sw = GetFileAttributesA("shaderwide.txt") != 0xFFFFFFFF; }
+        /* Milestone 99: on again by default - the game now widens only its culling (input.c), its projection stays 4:3 */
+        static u32 tw, sw; if (now - tw > 1000) { tw = now; sw = GetFileAttributesA("wide.txt") != 0xFFFFFFFF && GetFileAttributesA("noshaderwide.txt") == 0xFFFFFFFF; }   /* only with the culling-only widening (wide.txt) */
         g_wide_k = (sw && !stretch && cw * 3 > ch * 4) ? (4.0f * ch) / (3.0f * cw) : 1.0f;
         g_hud_k = (!stretch && cw * 3 > ch * 4) ? (4.0f * ch) / (3.0f * cw) : 1.0f; }   /* the HUD squeeze: how much the window stretches the 4:3 frame */
     if (stretch) { if (cw * 3 > ch * 4) { dw = ch * 4 / 3; dx = (cw - dw) / 2; } else { dh = cw * 3 / 4; dy = (ch - dh) / 2; } }   /* pillarbox.txt: 4:3 with bars (the user wants none: widescreen is drawn wider instead) */
