@@ -115,7 +115,10 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   Deploy the worker: `npx wrangler@4 deploy` in dist\matchlist. relay_log.txt = helper connects/disconnects.
   On a friend's PC the WebSocket upgrade got no answer and the helper (no receive limit) hung forever: the handshake now has
   10 s limits, each failure is logged with its step and Windows error, the session uses the system proxy (WinHttpOpen 4),
-  and a quiet connected room (receive timeout 12002) is not treated as lost.
+  and a quiet connected room (receive timeout 12002) is not treated as lost. relay_log.txt starts with the helper's version
+  ("relay helper started (version ...)"), a watchdog logs a step still waiting after 15 s / 60 s, a busy port is logged.
+  The installer closes bflist/bfview/bfserver running from the install folder before copying (an old hung helper kept
+  bflist.exe locked, so updates silently failed) and stops with a message if a file can't be replaced.
   Original (unpatched) default.xbe: the start-up disc authentication is skipped in memory (jge -> jmp at 0x2F8257).
   The in-game widescreen widening is off by default (wide.txt): it made the view pull back further after each sprint.
 - Milestone 101 (hit marker): hitmarker.wav (from the user's clip) plays when the player's shot hits a character. Hook on the

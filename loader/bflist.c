@@ -43,7 +43,7 @@ static u32 ip4(const char **p) { u32 ip = 0; for (int k = 0; k < 4; k++) { if (!
 static void put(char **w, const char *s) { while (*s) *(*w)++ = *s++; }
 static void putn(char **w, u32 v) { char d[12]; int z = 0; do d[z++] = (char)('0' + v % 10); while (v /= 10); while (z) *(*w)++ = d[--z]; }
 static void putip(char **w, u32 ip) { for (int k = 0; k < 4; k++) { putn(w, (ip >> (k * 8)) & 255); if (k < 3) *(*w)++ = '.'; } }
-static const char *word(const char *c, char *o, u32 cap) { while (*c == ' ') c++; u32 k = 0; int q = *c == '"'; if (q) c++; while (*c && (q ? *c != '"' : *c != ' ') && k < cap - 1) o[k++] = *c++; if (q && *c) c++; o[k] = 0; return c; }
+static const char *word(const char *c, char *o, u32 cap) { while (*c == ' ') c++; u32 k = 0; int q = *c == '"'; if (q) c++; while (*c && (q ? *c != '"' : *c != ' ')) { if (k < cap - 1) o[k++] = *c; c++; } if (q && *c) c++; o[k] = 0; return c; }   /* (a word longer than cap is cut but skipped whole: a long program path shifted every argument) */
 
 /* ---- Milestone 100: relay mode ----
  * bflist.exe relay <host> <path or -> <room> <game port> <loader pid>
@@ -65,19 +65,30 @@ static void logl(const char *s) {   /* relay_log.txt next to the game: connects 
 K32 DWORD WINAPI GetLastError(void);
 static char g_fail[96];   /* the step that failed and its Windows error, for the log */
 static void fail_at(const char *step) { char *w = g_fail; put(&w, "relay connect failed at "); put(&w, step); put(&w, ", error "); putn(&w, GetLastError()); *w = 0; }
+/* a watchdog for the connection steps: a step still running after 15 s (and after 60 s) is written to relay_log.txt, even if
+   the call itself never returns (on one PC the helper hung without a trace) */
+static volatile const char *g_step; static volatile u32 g_step_t;
+static void step(const char *s) { g_step = s; g_step_t = s ? (GetTickCount() | 1) : 0; }
+static u32 WINAPI watchdog(void *unused) {
+    (void)unused; u32 told = 0, told_t = 0;
+    for (;;) { Sleep(1000); u32 t0 = g_step_t; const char *s = (const char *)g_step; if (!t0 || !s) { told = 0; continue; }
+        u32 age = GetTickCount() - t0; if (t0 != told_t) { told_t = t0; told = 0; }
+        if ((age > 15000 && told == 0) || (age > 60000 && told == 1)) { told++; char b[120], *w = b; put(&w, "still waiting at "); put(&w, s); put(&w, " after "); putn(&w, age / 1000); put(&w, " s"); *w = 0; logl(b); } }
+    return 0; }
 static void *ws_connect(void) {
     /* every step has a time limit: on one PC the upgrade request was sent and no answer ever came (something between the
        PC and Cloudflare held it); with no receive limit the helper waited forever and never tried again */
     char q[192], *w = q; put(&w, g_path); put(&w, "/relay?room="); putn(&w, g_room); *w = 0;
     u16 wh[128], wp[256]; static const u16 GET[] = {'G','E','T',0}; wide(wh, g_host, 128); wide(wp, q, 256);
-    void *c = w_connect(g_ses, wh, 443, 0); if (!c) { fail_at("connect"); return 0; }
-    void *r = w_request(c, GET, wp, 0, 0, 0, 0x00800000 /* SECURE */); if (!r) { fail_at("open request"); w_close(c); return 0; }
+    step("connect"); void *c = w_connect(g_ses, wh, 443, 0); if (!c) { step(0); fail_at("connect"); return 0; }
+    step("open request"); void *r = w_request(c, GET, wp, 0, 0, 0, 0x00800000 /* SECURE */); if (!r) { step(0); fail_at("open request"); w_close(c); return 0; }
     if (w_timeouts) w_timeouts(r, 8000, 8000, 8000, 10000);   /* resolve, connect, send, receive: the answer within 10 s */
     void *ws = 0;
-    if (!w_option(r, 114 /* WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET */, 0, 0)) fail_at("upgrade option");
-    else if (!w_send(r, 0, 0, 0, 0, 0, 0)) fail_at("send");
-    else if (!w_receive(r, 0)) fail_at("receive (no answer from the server)");
-    else if (!(ws = w_upgrade(r, 0))) fail_at("upgrade (the answer was not a WebSocket)");
+    if (step("upgrade option"), !w_option(r, 114 /* WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET */, 0, 0)) fail_at("upgrade option");
+    else if (step("send"), !w_send(r, 0, 0, 0, 0, 0, 0)) fail_at("send");
+    else if (step("receive"), !w_receive(r, 0)) fail_at("receive (no answer from the server)");
+    else if (step("upgrade"), !(ws = w_upgrade(r, 0))) fail_at("upgrade (the answer was not a WebSocket)");
+    step(0);
     w_close(r); if (!ws) w_close(c);   /* (the connection handle stays open while the WebSocket lives) */
     else { u32 inf = 0; w_option(ws, 6 /* WINHTTP_OPTION_RECEIVE_TIMEOUT */, &inf, 4); }   /* connected: wait for frames as long as it takes */
     return ws; }
@@ -92,13 +103,14 @@ static u32 WINAPI rx_thread(void *unused) {   /* relay -> loader */
     return 0; }
 static void relay_main(HANDLE parent, u32 room, u32 port) {
     g_room = room;
-    u32 s = p_socket(2, 2, 17); SIN me = {2, bswap16((u16)(port - 1)), 0x0100007F}; if (s == 0xFFFFFFFF || p_bind(s, &me, sizeof me)) ExitProcess(3);
+    u32 s = p_socket(2, 2, 17); SIN me = {2, bswap16((u16)(port - 1)), 0x0100007F};
+    if (s == 0xFFFFFFFF || p_bind(s, &me, sizeof me)) { logl("relay helper could not start: its port is in use (an old helper still running? restart the PC)"); ExitProcess(3); }
     { int big = 1 << 20; static int (WINAPI *so)(u32, int, int, const void *, int); void *ws2 = LoadLibraryA("ws2_32.dll"); *(void **)&so = GetProcAddress(ws2, "setsockopt"); if (so) { so(s, 0xFFFF, 0x1002, &big, 4); so(s, 0xFFFF, 0x1001, &big, 4); } }
     { u32 one = 1; p_ioctlsocket(s, 0x8004667E /* FIONBIO */, &one); }   /* non-blocking: the loop below drains, then waits in select */
     g_sock = s; SIN ld = {2, bswap16((u16)port), 0x0100007F}; g_loader = ld;
-    u32 tid; CreateThread(0, 0, rx_thread, 0, 0, &tid);
+    u32 tid; CreateThread(0, 0, rx_thread, 0, 0, &tid); CreateThread(0, 0, watchdog, 0, 0, &tid);
     static u8 b[2048]; u32 heard = GetTickCount(), tryat = 0, ka = 0, fails = 0;
-    logl("relay helper started");
+    logl("relay helper started (version 2026-11-15b)");
     for (;;) {
         if (parent && WaitForSingleObject(parent, 0) == 0) break;   /* the game ended */
         u32 now = GetTickCount();

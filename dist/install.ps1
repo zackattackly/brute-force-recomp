@@ -14,7 +14,12 @@ function Test-GameFolder([string]$p) { return $p -and (Test-Path (Join-Path $p '
 # 1. the files
 if (Get-Process bflaunch -ErrorAction SilentlyContinue) { Write-Host "  The game is running. Close it first, then run the installer again." -ForegroundColor Yellow; Read-Host "  Press Enter to close"; exit 1 }
 New-Item -ItemType Directory -Force $Target | Out-Null
-Copy-Item (Join-Path $src '*') $Target -Recurse -Force
+# Helpers left running by an earlier version (its online helper could hang and outlive the game) keep their files locked:
+# close them first, or the copy fails and the old program stays
+foreach ($p in 'bflist', 'bfview', 'bfserver') { Get-Process $p -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($Target, [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Milliseconds 500
+try { Copy-Item (Join-Path $src '*') $Target -Recurse -Force -ErrorAction Stop }
+catch { Write-Host "  Could not replace a file: $($_.Exception.Message)" -ForegroundColor Red; Write-Host "  Restart the PC and run the installer again." -ForegroundColor Yellow; Read-Host "  Press Enter to close"; exit 1 }
 Write-Host "  Installed to $Target"
 
 # 2. the game (an extracted game folder: default.xbe and the data folder)
