@@ -153,6 +153,11 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   GetAsyncKeyState (a held key flickering to 0 read as extra presses). Where the game stores a menu's selection was not found
   (not in the top menu object or one level down); pad[57] = the top menu's +0x88 busy flag (not set on every menu).
   Test aids: menutext.txt (menu_text_log.txt), menulog.txt (menu_mouse_log.txt), menusel.txt.
+- Milestone 105: weapons on the ground could not be picked up (hold X = R). Found by A/B with nogamehooks.txt, then
+  aimassist.txt / noweaponhook.txt: the aim-assist removal blanked every lock / reticle target, and pick-up uses the object
+  under the reticle (+0x5E4). Now only characters ([[t+0xC]+4] == 3) are blanked (lock_stub1/2, friction_stub).
+- Power throttling (bfcore.c): the request with IGNORE_TIMER_RESOLUTION is Windows 11 only; Windows 10 refused the whole
+  call ("could not be turned off" on a friend's PC with frame drops and flicker), so it retries with EXECUTION_SPEED alone.
 - Next: weapon poses (bone level), START icon in HUD text draws black.
 - Semaphore releases (0x1D70) are now written to D3D's fence word, replacing the GET==PUT fence shortcut.
 - Test aids: `bench.txt` (renderer benchmark at start), `rbench.bat` (standalone), the `[profile]` log lines

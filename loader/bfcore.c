@@ -144,7 +144,11 @@ __declspec(dllexport) void __cdecl BfMain(const char *unused) {
     /* Opt out of Windows 11 power throttling (EcoQoS), so the loader keeps its speed and timer resolution when its
        window is not in front (a precaution: the long freezes of Milestone 77 had another cause, see gpu.c's viewer). */
     { IMP BOOL WINAPI SetProcessInformation(HANDLE, u32, void *, u32); u32 pt[3] = {1, 0x1 | 0x4, 0};   /* EXECUTION_SPEED | IGNORE_TIMER_RESOLUTION, both off */
-      out(SetProcessInformation((HANDLE)-1, 4 /* ProcessPowerThrottling */, pt, sizeof pt) ? "Power throttling: off\r\n" : "Power throttling: could not be turned off\r\n"); }
+      /* Windows 10 does not know IGNORE_TIMER_RESOLUTION (Windows 11 only) and refused the whole request, so nothing was turned
+         off there: a friend's PC logged "could not be turned off" and had frame drops and flicker (the loader is a background
+         process to Windows, the game window being the viewer's). Then: execution speed alone. */
+      if (SetProcessInformation((HANDLE)-1, 4 /* ProcessPowerThrottling */, pt, sizeof pt)) out("Power throttling: off\r\n");
+      else { u32 p2[3] = {1, 0x1, 0}; out(SetProcessInformation((HANDLE)-1, 4, p2, sizeof p2) ? "Power throttling: off (execution speed; this Windows has no timer setting)\r\n" : "Power throttling: could not be turned off\r\n"); } }
     /* Milestone 86: in the background (the game window is in front) Windows froze most of this process's threads for
        ~1.5 s every few seconds, even a time-critical spinning one: 1.5 s gaps in the sound. High priority class. */
     { IMP BOOL WINAPI SetPriorityClass(HANDLE, DWORD); if (GetFileAttributesA("normalpriority.txt") == 0xFFFFFFFF) out(SetPriorityClass((HANDLE)-1, 0x80 /* HIGH_PRIORITY_CLASS */) ? "Priority class: high\r\n" : "Priority class: could not be raised\r\n"); }

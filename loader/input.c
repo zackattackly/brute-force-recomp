@@ -495,17 +495,27 @@ __attribute__((naked)) static void move_stub(void) { __asm__ volatile(
     "movl (%esp), %edx\n\t cmpl $0x1332A0, %edx\n\t jb 1f\n\t cmpl $0x1351C0, %edx\n\t jae 1f\n\t movl %ecx, _g_player_char\n\t"
     "cmpl $0, _g_mouse_on\n\t je 1f\n\t pushl %eax\n\t pushl %ecx\n\t pushl %ecx\n\t call _mouse_apply\n\t addl $4, %esp\n\t popl %ecx\n\t popl %eax\n"
     "1:\n\t subl $8, %esp\n\t movl 8(%eax), %edx\n\t pushl $0x11E576\n\t ret"); }
+/* Milestone 105: only characters are taken away from the lock-on and the reticle (that is the aim assist: the pull toward an
+   enemy). Everything else stays: holding X picks up the weapon the reticle / lock is on, and with every target cleared no
+   weapon on the ground could be picked up. */
+static int readable(const void *p, u32 n);
+u32 aim_is_character(u32 t) { if (t < 0x10000 || !readable((void *)(t + 0xC), 4)) return 0; u32 ty = *(u32 *)(t + 0xC); return ty >= 0x10000 && readable((void *)(ty + 4), 4) && *(u32 *)(ty + 4) == 3; }
+u32 aim_reticle_keep(u32 t) { return aim_is_character(t) ? 0 : t; }
 __attribute__((naked)) static void lock_stub1(void) { __asm__ volatile(
-    "incl _g_lock_calls\n\t cmpl _g_player_char, %ebx\n\t jne 2f\n\t cmpl $0, _g_mouse_on\n\t je 2f\n\t testl %edi, %edi\n\t jz 2f\n\t incl _g_lock_hits\n\t pushl %edi\n\t xorl %edi, %edi\n\t call 2f\n\t popl %edi\n\t ret\n"
+    "incl _g_lock_calls\n\t cmpl _g_player_char, %ebx\n\t jne 2f\n\t cmpl $0, _g_mouse_on\n\t je 2f\n\t testl %edi, %edi\n\t jz 2f\n\t"
+    "pushal\n\t pushl %edi\n\t call _aim_is_character\n\t addl $4, %esp\n\t testl %eax, %eax\n\t popal\n\t jz 2f\n\t"   /* (popal leaves the flags alone) */
+    "incl _g_lock_hits\n\t pushl %edi\n\t xorl %edi, %edi\n\t call 2f\n\t popl %edi\n\t ret\n"
     "2:\n\t movl 0x638(%ebx), %eax\n\t pushl $0xC4E76\n\t ret"); }
 __attribute__((naked)) static void lock_stub2(void) { __asm__ volatile(
-    "incl _g_lock_calls\n\t cmpl _g_player_char, %ebx\n\t jne 2f\n\t cmpl $0, _g_mouse_on\n\t je 2f\n\t testl %edi, %edi\n\t jz 2f\n\t incl _g_lock_hits\n\t pushl %edi\n\t xorl %edi, %edi\n\t call 2f\n\t popl %edi\n\t ret\n"
+    "incl _g_lock_calls\n\t cmpl _g_player_char, %ebx\n\t jne 2f\n\t cmpl $0, _g_mouse_on\n\t je 2f\n\t testl %edi, %edi\n\t jz 2f\n\t"
+    "pushal\n\t pushl %edi\n\t call _aim_is_character\n\t addl $4, %esp\n\t testl %eax, %eax\n\t popal\n\t jz 2f\n\t"
+    "incl _g_lock_hits\n\t pushl %edi\n\t xorl %edi, %edi\n\t call 2f\n\t popl %edi\n\t ret\n"
     "2:\n\t movl 0x638(%ebx), %eax\n\t pushl $0xC4EC6\n\t ret"); }
 /* aim friction and magnetism (CharacterType_HandlePlayerInput): at 0x13389D, while character +0x7DC > 0 the stick is
    scaled by 0.75 (0x3C0550); from 0x1338CC the target under the reticle (+0x5E4) pulls the aim toward it. While the
    mouse aims: skip both (no friction, no reticle target) and continue at 0x1338D2. */
-__attribute__((naked)) static void friction_stub(void) { __asm__ volatile(
-    "cmpl $0, _g_mouse_on\n\t je 1f\n\t xorl %ebx, %ebx\n\t pushl $0x1338D2\n\t ret\n"
+__attribute__((naked)) static void friction_stub(void) { __asm__ volatile(   /* (Milestone 105: the reticle's object is kept unless it is a character) */
+    "cmpl $0, _g_mouse_on\n\t je 1f\n\t pushl %eax\n\t pushl %ecx\n\t pushl %edx\n\t pushl 0x5e4(%ebp)\n\t call _aim_reticle_keep\n\t addl $4, %esp\n\t movl %eax, %ebx\n\t popl %edx\n\t popl %ecx\n\t popl %eax\n\t pushl $0x1338D2\n\t ret\n"
     "1:\n\t flds 0x7dc(%ebp)\n\t pushl $0x1338A3\n\t ret"); }
 static int hook6(u32 at, void *fn, const u8 *expect) { u8 *p = (u8 *)at; for (int k = 0; k < 6; k++) if (p[k] != expect[k]) return 0; p[0] = 0xE9; *(u32 *)(p + 1) = (u32)fn - (at + 5); p[5] = 0x90; return 1; }
 /* follow camera (Milestone 87, over-the-shoulder aim): vtable 0x3A2640 +0x6C is FollowCamera_Update (0x702A0, thiscall,
