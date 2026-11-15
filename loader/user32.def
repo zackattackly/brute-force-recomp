@@ -31,3 +31,5 @@ SetWindowPos@28
 MonitorFromWindow@8
 GetMonitorInfoA@8
 GetWindowRect@8
+CreateIconIndirect@4
+SetCursor@4

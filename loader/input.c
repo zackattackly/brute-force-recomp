@@ -60,6 +60,32 @@ u8 *menu_system(void) {
     u32 a = *(u32 *)0x469b58; if (!a || !readable((void *)(a + 8), 4)) return 0; u8 *ui = *(u8 **)(a + 8); if (!ui || !readable(ui, 4)) return 0;
     u32 *vt = *(u32 **)ui; if (!readable(vt + 0x78 / 4, 4)) return 0;
     return ((u8 *(__thiscall *)(void *))vt[0x78 / 4])(ui); }
+/* Milestone 103 probe (menusel.txt): the top menu object (the list's last node +8) every 150 ms: its small whole numbers (< 64)
+   that changed since the last look, and the same one level down (pointer fields to readable memory) -> the log */
+void menu_sel_probe(void) {
+    {   /* Milestone 103: the open menu's busy flag (+0x88: 1 while it animates a move, 0 when it takes the next press) for the
+           viewer's mouse stepping: RING pad[57] = 1 + flag (0 = no menu) */
+        u32 *pd = gpu_pad(); if (pd) { u32 st = 0; u8 *m = menu_system();
+            if (m && readable(m + 8, 4)) { u8 *sen = *(u8 **)(m + 8); if (sen && readable(sen + 4, 4)) { u8 *node = *(u8 **)(sen + 4);
+                if (node && node != sen && readable(node + 8, 4)) { u8 *mo = *(u8 **)(node + 8); if (mo && readable(mo + 0x88, 4)) st = 1 + (*(u32 *)(mo + 0x88) ? 1 : 0); } } }
+            pd[57] = st; } }
+    static u32 on = 2, tl; if (on == 2) on = GetFileAttributesA("menusel.txt") != 0xFFFFFFFF; if (!on) return;
+    u32 now = GetTickCount(); if (now - tl < 150) return; tl = now;
+    u8 *m = menu_system(); if (!m || !readable(m + 8, 4)) return; u8 *sen = *(u8 **)(m + 8); if (!sen || !readable(sen + 4, 4)) return;
+    u8 *node = *(u8 **)(sen + 4); if (!node || node == sen || !readable(node + 8, 4)) return; u8 *menu = *(u8 **)(node + 8); if (!menu || !readable(menu, 0x400)) return;
+    static u8 *lastm; static u32 snap[0x100], sub[0x40][0x40]; static u32 subp[0x40]; static u32 nl;
+    if (menu != lastm) { lastm = menu; out("  [menusel] menu "); hex((u32)menu); out(" name "); hex(*(u32 *)(menu + 0x24)); out("\r\n"); for (int i = 0; i < 0x100; i++) snap[i] = ((u32 *)menu)[i]; for (int i = 0; i < 0x40; i++) subp[i] = 0; return; }
+    if (nl > 600) return;
+    /* small numbers (< 64) and pointers (0x8xxxxxxx) that changed; floats (animations) are left out */
+    #define PTRV(a) (((a) >= 0x00100000u && (a) < 0x04000000u) || ((a) >= 0x80000000u && (a) < 0x84000000u))   /* menu objects live at 0x06xxxxxx-style low addresses too */
+    #define INTERESTING(a, b) (((a) < 64 && (b) < 64) || (PTRV(a) && PTRV(b)) || ((a) >= 0x04000000u && (a) < 0x08000000u && (b) >= 0x04000000u && (b) < 0x08000000u))
+    for (int i = 0; i < 0x100; i++) { u32 v = ((u32 *)menu)[i]; if (v != snap[i] && INTERESTING(v, snap[i]) && i != 0x88 / 4) { nl++; out("  [menusel] +"); hex(i * 4); out(" "); hex(snap[i]); out(" -> "); hex(v); out("\r\n"); } snap[i] = v; }
+    for (int i = 0; i < 0x40; i++) { u32 p = ((u32 *)menu)[i]; if (p < 0x00100000u || (p >= 0x08000000u && p < 0x80000000u) || p >= 0x84000000u || !readable((void *)p, 0x100)) continue;
+        if (subp[i] != p) { subp[i] = p; for (int k = 0; k < 0x40; k++) sub[i][k] = ((u32 *)p)[k]; continue; }
+        for (int k = 0; k < 0x40; k++) { u32 v = ((u32 *)p)[k]; if (v != sub[i][k] && INTERESTING(v, sub[i][k])) { nl++; out("  [menusel] +"); hex(i * 4); out("->+"); hex(k * 4); out(" "); hex(sub[i][k]); out(" -> "); hex(v); out("\r\n"); } sub[i][k] = v; } }
+    #undef INTERESTING
+    #undef PTRV
+    }
 static void menu_probe(void) {
     static u32 on = 2, tl, n; u32 nw = GetTickCount(); if (on == 2) on = GetFileAttributesA("menuprobe.txt") != 0xFFFFFFFF; if (!on || nw - tl < 1000) return; tl = nw; n++;
     u8 *m = menu_system(); if (!m || !readable(m, 0x200)) { out("  [menuprobe] no menu system\r\n"); return; }
@@ -239,13 +265,16 @@ static u32 NTAPI XInputGetState_(u32 h, XSTATE *s) {
         an[6] = p.lt; an[7] = p.rt;
     }
     s->lx = p.lx; s->ly = p.ly; s->rx = p.rx; s->ry = p.ry;
+    { void menu_sel_probe(void); menu_sel_probe(); }   /* Milestone 103 probe (menusel.txt) */
     {   /* the keyboard, through the key bindings (Milestone 96); Enter is always START as well */
         if (kb_key(KB_DUP)) b |= 1; if (kb_key(KB_DDOWN)) b |= 2; if (kb_key(KB_DLEFT)) b |= 4; if (kb_key(KB_DRIGHT)) b |= 8;
         /* Esc: START (pause) in gameplay, B (Back) in the menus (user). Gameplay = the camera heartbeat pad[55] seen in the last 0.3 s */
         static u32 esc_mode; int esc = key(0x1B), play = 0; { u32 *pd = gpu_pad(); if (pd && pd[55]) play = (s32)(GetTickCount() - pd[55]) < 300; }
         if (!esc) esc_mode = 0; else if (!esc_mode) esc_mode = play ? 1 : 2;   /* decided when pressed, kept while held */
         if (esc_mode == 1 || key(0x0D)) b |= 0x10; if (kb_key(KB_BACKBTN)) b |= 0x20; if (kb_key(KB_L3)) b |= 0x40; if (kb_key(KB_R3)) b |= 0x80;
-        if (kb_key(KB_A)) an[0] = 255; if (kb_key(KB_B) || esc_mode == 2) an[1] = 255; if (kb_key(KB_X)) an[2] = 255; if (kb_key(KB_Y)) an[3] = 255;
+        if (kb_key(KB_A)) an[0] = 255; if (kb_key(KB_B) || esc_mode == 2) an[1] = 255;
+        /* Milestone 103: menu clicks (bfgl.c menu_tick): the viewer presses private key codes 0x88 up, 0x89 down, 0x8A A, 0x8B B */
+        if (key(0x88)) b |= 1; if (key(0x89)) b |= 2; if (key(0x8A)) an[0] = 255; if (key(0x8B)) an[1] = 255; if (kb_key(KB_X)) an[2] = 255; if (kb_key(KB_Y)) an[3] = 255;
         if (kb_key(KB_BLACK)) an[4] = 255; if (kb_key(KB_WHITE)) an[5] = 255; if (kb_key(KB_LT)) an[6] = 255; if (kb_key(KB_RT)) an[7] = 255;
         if (kb_key(KB_LEFT) || kb_key(KB_RIGHT)) s->lx = axis(kb_key(KB_LEFT), kb_key(KB_RIGHT)); if (kb_key(KB_FWD) || kb_key(KB_BACKW)) s->ly = axis(kb_key(KB_BACKW), kb_key(KB_FWD));
         if (key('J') || key('L')) s->rx = axis(key('J'), key('L')); if (key('I') || key('K')) s->ry = axis(key('K'), key('I'));

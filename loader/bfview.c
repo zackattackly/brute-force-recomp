@@ -83,13 +83,46 @@ static void set_full(int on) {
     }
     g_full = on;
 }
+/* Milestone 103: a silver arrow cursor while the mouse is free (menus); a click on a menu option selects it (bfgl.c), a right
+   click is Back. In gameplay a click captures the mouse for aiming as before; the pause menu (options on screen, the game not
+   running) lets it go again. */
+K32 void *WINAPI CreateIconIndirect(void *);
+K32 void *WINAPI SetCursor(void *);
+K32 void *WINAPI CreateBitmap(s32, s32, u32, u32, const void *);
+K32 void *WINAPI CreateDIBSection(void *, const void *, u32, void **, void *, u32);
+int gl_gameplay(void); int gl_menu_up(void); void gl_menu_click(s32 x, s32 y, int btn); void gl_menu_keys(u8 *keys); void gl_menu_hover(s32 x, s32 y);
+static void *g_arrow; static int g_userfree;   /* g_userfree: F10 freed the mouse (no auto capture until a click) */
+static int in_poly(float x, float y, const float *p, int n) { int c = 0; for (int i = 0, j = n - 1; i < n; j = i++) if (((p[i * 2 + 1] > y) != (p[j * 2 + 1] > y)) && (x < (p[j * 2] - p[i * 2]) * (y - p[i * 2 + 1]) / (p[j * 2 + 1] - p[i * 2 + 1]) + p[i * 2])) c = !c; return c; }
+static void make_arrow(void) {   /* 32x32 with alpha: the classic arrow, silver (a vertical sheen), dark outline */
+    static const float shape[14] = {0, 0, 0, 21, 5, 16, 9, 25, 12, 23.6f, 8, 15, 15, 15};
+    float p[14]; for (int i = 0; i < 14; i++) p[i] = shape[i] * 1.12f + 1.0f;
+    struct { u32 size; s32 w, h; u16 planes, bits; u32 comp, sz, xp, yp, used, imp; } bi = {40, 32, -32, 1, 32, 0, 0, 0, 0, 0, 0};
+    u32 *px = 0; void *col = CreateDIBSection(0, &bi, 0, (void **)&px, 0, 0); if (!col || !px) return;
+    static u8 inside[32][32];
+    for (int y = 0; y < 32; y++) for (int x = 0; x < 32; x++) inside[y][x] = (u8)in_poly(x + 0.5f, y + 0.5f, p, 7);
+    for (int y = 0; y < 32; y++) for (int x = 0; x < 32; x++) {
+        u32 v = 0; int in = inside[y][x], edge = 0;
+        for (int dy = -1; dy <= 1 && !in; dy++) for (int dx = -1; dx <= 1; dx++) { int xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < 32 && yy < 32 && inside[yy][xx]) edge = 1; }
+        if (in) { int bord = 0; for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) { int xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= 32 || yy >= 32 || !inside[yy][xx]) bord = 1; }
+            if (bord) v = 0xFF2A2D33; else { float t = (float)(x - y * 0.35f) / 12.0f; s32 l = (s32)(238 - 70 * (t < 0 ? 0 : t > 1 ? 1 : t) - y * 1.6f); if (x + y * 0.2f < 4.5f) l += 14; if (l > 250) l = 250; if (l < 120) l = 120;
+                v = 0xFF000000u | (u32)l << 16 | (u32)(l + 3 > 255 ? 255 : l + 3) << 8 | (u32)(l + 10 > 255 ? 255 : l + 10); } }
+        else if (edge) v = 0x60000000;   /* a soft shadow line */
+        px[y * 32 + x] = v; }
+    static u8 mask[32 * 4]; void *mb = CreateBitmap(32, 32, 1, 1, mask);
+    struct { s32 icon; u32 hx, hy; void *mask, *color; } ii = {0, 1, 1, mb, col};
+    g_arrow = CreateIconIndirect(&ii); }
 static u32 g_wheel_up_until, g_wheel_dn_until;   /* Milestone 96: a wheel notch shows as a 120 ms press of key 0x0E (up) / 0x0F (down), codes Windows leaves unused */
 static s32 WINAPI wndproc(void *h, u32 m, u32 wp, u32 lp) {
     if (m == 0x020A) { short d = (short)(wp >> 16); if (d > 0) g_wheel_up_until = GetTickCount() + 120; else if (d < 0) g_wheel_dn_until = GetTickCount() + 120; return 0; }   /* WM_MOUSEWHEEL */
     if (m == 0x0010) { mouse_release(); v->closed = 1; ExitProcess(0); }   /* WM_CLOSE: tell the loader, then end */
-    if (m == 0x0201) mouse_capture();                                       /* WM_LBUTTONDOWN */
+    if (m == 0x0201) {   /* WM_LBUTTONDOWN: a menu option (options on screen, not in play), else capture for aiming */
+        g_userfree = 0;
+        if (g_gl && !g_cap && gl_menu_up() && !gl_gameplay()) gl_menu_click((short)(lp & 0xFFFF), (short)(lp >> 16), 1); else mouse_capture(); }
+    if (m == 0x0200 && g_gl && !g_cap && gl_menu_up() && !gl_gameplay()) gl_menu_hover((short)(lp & 0xFFFF), (short)(lp >> 16));   /* WM_MOUSEMOVE: highlight what the arrow is on */
+    if (m == 0x0204 && g_gl && !g_cap && gl_menu_up() && !gl_gameplay()) gl_menu_click((short)(lp & 0xFFFF), (short)(lp >> 16), 2);   /* WM_RBUTTONDOWN: Back */
+    if (m == 0x0020 && (lp & 0xFFFF) == 1 && g_arrow && !g_cap) { SetCursor(g_arrow); return 1; }   /* WM_SETCURSOR in the client area: the silver arrow */
     if (m == 0x0008) mouse_release();                                       /* WM_KILLFOCUS */
-    if ((m == 0x0104 || m == 0x0100) && wp == 0x79) { mouse_release(); return 0; }   /* F10 (a system key: no menu) */
+    if ((m == 0x0104 || m == 0x0100) && wp == 0x79) { mouse_release(); g_userfree = 1; return 0; }   /* F10 (a system key: no menu): free until the next click */
     if ((m == 0x0100 && wp == 0x7A) || (m == 0x0104 && wp == 0x0D && (lp & (1u << 29)))) { if (!(lp & (1u << 30))) set_full(!g_full); return 0; }   /* F11 / Alt+Enter: full screen on or off */
     if (m == 0x0100 && wp == 0x7B) { extern volatile int g_shot_req; g_shot_req = 1; return 0; }   /* F12: screenshot (bfgl.c) */
     return DefWindowProcA(h, m, wp, lp);
@@ -127,6 +160,7 @@ void WINAPI start(void) {
     g_wnd = CreateWindowExA(0, "BruteForcePCView", "Brute Force (PC loader)", 0x10CF0000 /* visible overlapped */, 760, 60, r[2] - r[0], r[3] - r[1], 0, 0, wc.inst, 0);
     if (GetFileAttributesA("windowed.txt") == 0xFFFFFFFF) set_full(1);   /* full screen unless windowed.txt */
     g_gl = gl_init(g_wnd);
+    make_arrow();   /* Milestone 103 */
     { void audio_start(void); audio_start(); }
     music_start();
     u32 last = 0xFFFFFFFF; char title[128]; title[0] = 0;
@@ -134,9 +168,16 @@ void WINAPI start(void) {
         MSG msg; while (PeekMessageA(&msg, 0, 0, 0, 1)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
         if (loader && WaitForSingleObject(loader, 0) == 0) ExitProcess(0);   /* the loader has ended */
         int fg = GetForegroundWindow() == g_wnd; v->focused = fg;
-        for (int k = 0; k < 256; k++) v->keys[k] = fg && (GetAsyncKeyState(k) & 0x8000) ? 1 : 0;
+        for (int k = 0; k < 256; k++) if (k < 0x88 || k > 0x8B) v->keys[k] = fg && (GetAsyncKeyState(k) & 0x8000) ? 1 : 0;   /* 0x88..0x8B: the menu mouse's own keys (gl_menu_keys), never touched here: a held one flickering to 0 between the two writes read as several presses */
         { u32 nw = GetTickCount(); v->keys[0x0E] = fg && nw < g_wheel_up_until; v->keys[0x0F] = fg && nw < g_wheel_dn_until; }   /* the mouse wheel */
         if (!fg) mouse_release();
+        if (g_gl) {   /* Milestone 103: menus - the mouse buttons are not game buttons there (clicks pick options); the pause menu frees the mouse */
+            if (!g_cap) { v->keys[1] = v->keys[2] = v->keys[4] = 0; }
+            if (g_cap && gl_menu_up() && !gl_gameplay()) mouse_release();
+            /* auto capture (user): in play, with the window in front and no menu options on the screen, the mouse is taken for
+               aiming without a click; F10 leaves it free until the next click in the window */
+            if (fg && !g_cap && !g_cap_pending && !g_userfree && gl_gameplay() && !gl_menu_up() && !(GetAsyncKeyState(1) & 0x8000)) mouse_capture();
+            { u8 mk[256]; mk[0x88] = mk[0x89] = mk[0x8A] = mk[0x8B] = 0; gl_menu_keys(mk); for (int k = 0x88; k <= 0x8B; k++) { u8 want = fg ? mk[k] : 0; if (v->keys[k] != want) v->keys[k] = want; } } }
         if (g_cap_pending && !(GetAsyncKeyState(1) & 0x8000)) { g_cap_pending = 0; g_cap = 1; v->mcap = 1; }   /* captured once the click is let go */
         if (g_cap || g_cap_pending) { s32 p[2], c[2]; GetCursorPos(p); mouse_center(c); if (p[0] != c[0] || p[1] != c[1]) { if (g_cap) { v->mdx += p[0] - c[0]; v->mdy += p[1] - c[1]; } SetCursorPos(c[0], c[1]); } }
         if (g_gl) { u32 t0 = GetTickCount(); int any = 0; while (gl_pump() && GetTickCount() - t0 < 30) any = 1; extern void gl_account(u32 busy, int any); gl_account(GetTickCount() - t0, any); }

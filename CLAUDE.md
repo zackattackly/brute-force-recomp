@@ -127,6 +127,13 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   no blend, 640x480 target) into a 16x16 depth FBO with culling off; probe_flip reads it back via PBOs -> pad[80] distance,
   pad[81] counter; cam_collide stops the camera 0.3 m in front (in at once, out over ~1/3 s). nocamcollide.txt = off.
   (The world raycast 0xDDD10 never hit walls from the camera: Milestone 94 is superseded.)
+- Milestone 103 (mouse in the menus, works): silver arrow cursor (bfview.c make_arrow); hovering an option highlights it, left click
+  = A, right click = B. bfgl.c menu_glyph/menu_flip find the options each frame from the font quads (256x512 fonts; unselected
+  colour 30,110,150, selected 215,236,251; lines touching/overlapping = one option); gl_menu_keys steps the game's selection with
+  private keys 0x88 up / 0x89 down / 0x8A A / 0x8B B (input.c adds them to the pad). bfview.c must not rewrite those keys from
+  GetAsyncKeyState (a held key flickering to 0 read as extra presses). Where the game stores a menu's selection was not found
+  (not in the top menu object or one level down); pad[57] = the top menu's +0x88 busy flag (not set on every menu).
+  Test aids: menutext.txt (menu_text_log.txt), menulog.txt (menu_mouse_log.txt), menusel.txt.
 - Next: weapon poses (bone level), START icon in HUD text draws black.
 - Semaphore releases (0x1D70) are now written to D3D's fence word, replacing the GET==PUT fence shortcut.
 - Test aids: `bench.txt` (renderer benchmark at start), `rbench.bat` (standalone), the `[profile]` log lines

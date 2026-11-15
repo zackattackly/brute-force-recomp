@@ -1163,7 +1163,93 @@ static void hud_squeeze(f32 *v, u32 n, u32 stride) {
         if (!(x1 - x0 > W * 0.94f && y1 - y0 > W * 0.7f)) {   /* never a full-screen pass */
             k = g_hud_k; anchor = g_hud_corner ? 0 : W / 2; } }
     hud_uniform(k, anchor); }
+/* ---- Milestone 103: clicking menu options ----
+   Menu text is drawn a letter at a time (quads) with the 256x512 fonts; an option the cursor is not on is drawn in 30,110,150,
+   the selected option in 215,236,251 (plus a fainter glow and echo, which are ignored), other text in other colours. Each frame
+   the letters of these two colours are grouped into lines; at the flip, lines that touch vertically (an option on two lines)
+   become one option, sorted top to bottom. A click on an option presses down / up one step at a time until the game shows that
+   option selected, then A; a right click is B. The keys are private codes the loader adds to the controller (input.c). */
+typedef struct { f32 x0, y0, x1, y1; int sel; } MOPT;
+#define NMO 48
+static MOPT g_mcur[NMO], g_mo[NMO]; static u32 g_mcurn, g_mon, g_mo_frame, g_mo_tick; static s32 g_scr[6];   /* the frame's place in the window: dx, dy (from the bottom), dw, dh, cw, ch */
+static void menu_glyph(u32 mode, u32 n, f32 *v) {
+    if (mode != 8 || n != 4 || !((K(0x1B0C) >> 30) & 1)) return; TI t; if (!tex_info(0, &t) || t.w != 256 || t.h != 512) return;
+    f32 *c = v + 3 * 4; s32 r = (s32)(c[0] * 255), g = (s32)(c[1] * 255), b = (s32)(c[2] * 255), a = (s32)(c[3] * 255); if (a < 200) return;
+    int cls = (r > 18 && r < 42 && g > 98 && g < 122 && b > 138 && b < 162) ? 1 : (r > 203 && g > 224 && b > 239) ? 2 : 0; if (!cls) return;
+    f32 x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f; for (u32 k = 0; k < 4; k++) { f32 *q = v + k * 64; if (q[0] < x0) x0 = q[0]; if (q[0] > x1) x1 = q[0]; if (q[1] < y0) y0 = q[1]; if (q[1] > y1) y1 = q[1]; }
+    for (u32 i = 0; i < g_mcurn; i++) { MOPT *L = &g_mcur[i];
+        if (!(y1 < L->y0 + 4 || y0 > L->y1 - 4) && x0 <= L->x1 + 14 && x1 >= L->x0 - 14) { if (x0 < L->x0) L->x0 = x0; if (x1 > L->x1) L->x1 = x1; if (y0 < L->y0) L->y0 = y0; if (y1 > L->y1) L->y1 = y1; if (cls == 2) L->sel = 1; return; } }
+    if (g_mcurn < NMO) { MOPT *L = &g_mcur[g_mcurn++]; L->x0 = x0; L->y0 = y0; L->x1 = x1; L->y1 = y1; L->sel = cls == 2; } }
+static void menu_flip(void) {   /* this frame's lines -> options (two touching lines = one option), top to bottom */
+    MOPT o[NMO]; u32 n = 0;
+    for (u32 i = 0; i < g_mcurn; i++) { MOPT L = g_mcur[i]; u32 j = 0;
+        for (; j < n; j++) { MOPT *P = &o[j]; f32 gap = L.y0 > P->y1 ? L.y0 - P->y1 : P->y0 > L.y1 ? P->y0 - L.y1 : 0;
+            if (gap <= 1 && L.x0 <= P->x1 && L.x1 >= P->x0) {   /* the two halves of a two-line option overlap (SQUAD / DEATHMATCH: -1 px); separate options in a list can be 3 px apart */ if (L.x0 < P->x0) P->x0 = L.x0; if (L.x1 > P->x1) P->x1 = L.x1; if (L.y0 < P->y0) P->y0 = L.y0; if (L.y1 > P->y1) P->y1 = L.y1; P->sel |= L.sel; break; } }
+        if (j == n) o[n++] = L; }
+    for (u32 i = 1; i < n; i++) { MOPT k = o[i]; s32 j = (s32)i - 1; while (j >= 0 && (o[j].y0 > k.y0 + 4 || (o[j].y0 > k.y0 - 4 && o[j].x0 > k.x0))) { o[j + 1] = o[j]; j--; } o[j + 1] = k; }
+    for (u32 i = 0; i < n; i++) g_mo[i] = o[i]; g_mon = n; g_mo_frame++; if (n) g_mo_tick = GetTickCount(); g_mcurn = 0;
+    {   /* the selection is "steady" once the same option (and the same number of options) shows selected two frames running:
+           while the game animates a change, two options can look selected for a moment (the stepping bounced on that) */
+        extern s32 g_sel_now; extern u32 g_sel_steady; static u32 lastn; s32 sel = -1, nsel = 0; for (u32 i = 0; i < n; i++) if (g_mo[i].sel) { sel = (s32)i; nsel++; }
+        if (nsel != 1) sel = -1;
+        if (sel == g_sel_now && n == lastn) g_sel_steady++; else g_sel_steady = 0; g_sel_now = sel; lastn = n; } }
+s32 g_sel_now = -1; u32 g_sel_steady;
+int gl_gameplay(void) { return g_r && g_r->pad[55] && (s32)(GetTickCount() - g_r->pad[55]) < 400; }
+int gl_menu_up(void) { return g_mon > 0 && GetTickCount() - g_mo_tick < 400; }   /* options on the screen just now */
+/* the mouse in the menus: hovering an option moves the game's selection there (one step at a time, each only once the menu
+   shows the last one steadily); a left click presses A once the option under the arrow is the selected one; a right click is B */
+static struct { s32 x, y, hover, have; int pend_a, pend_b, pressing, key; u32 ta, tp, tr, fr, steps; } g_mm;
+static void menu_mouse_pos(s32 cx, s32 cy) {   /* window client coordinates (top-left origin) -> the 640x480 frame */
+    s32 *s = g_scr; if (s[2] <= 0 || s[3] <= 0) return;
+    f32 fx = (f32)(cx - s[0]) * 640.0f / s[2];   /* (2D text is narrowed about the centre by g_hud_k in a wide window: undo it) */
+    g_mm.x = (s32)(320.0f + (fx - 320.0f) / (g_hud_k > 0.1f ? g_hud_k : 1.0f)); g_mm.y = (cy - (s[5] - s[1] - s[3])) * 480 / s[3]; g_mm.have = 1; }
+void gl_menu_hover(s32 cx, s32 cy) { s32 ox = g_mm.x, oy = g_mm.y; menu_mouse_pos(cx, cy); if (g_mm.x != ox || g_mm.y != oy) { g_mm.hover = 1; g_mm.steps = 0; } }
+void gl_menu_click(s32 cx, s32 cy, int btn) {
+    menu_mouse_pos(cx, cy); if (btn == 2) g_mm.pend_b = 1; else { g_mm.pend_a = 1; g_mm.hover = 1; g_mm.steps = 0; g_mm.ta = GetTickCount(); } }
+static s32 menu_under_mouse(void) {
+    /* the option whose centre line is nearest the arrow (in its column: the text widened by 60 px; at most 40 px above or below
+       its centre). The selected option is drawn larger, so its box grows when it becomes selected; boxes would hand the arrow back
+       and forth near a border (the highlight jumped). Centres with a 6 px margin keep the current one until another is clearly nearer. */
+    static s32 cur = -1; static u32 curn;
+    if (!g_mm.have) return -1; s32 best = -1; f32 bd = 1e9f, dcur = 1e9f;
+    if (curn != g_mon) { cur = -1; curn = g_mon; }
+    for (u32 i = 0; i < g_mon; i++) { MOPT *o = &g_mo[i]; if (g_mm.x < o->x0 - 60 || g_mm.x > o->x1 + 60) continue;
+        f32 c = (o->y0 + o->y1) * 0.5f, d = g_mm.y > c ? g_mm.y - c : c - g_mm.y; if (d > 40) continue;
+        if ((s32)i == cur) dcur = d; if (d < bd) { bd = d; best = (s32)i; } }
+    if (best < 0) { cur = -1; return -1; }
+    if (cur >= 0 && dcur < 1e8f && bd > dcur - 6) return cur;   /* keep the current one unless another is clearly nearer */
+    cur = best; return best; }
+void gl_menu_keys(u8 *keys) {   /* called by bfview.exe's loop: sets the private keys 0x88 up, 0x89 down, 0x8A A, 0x8B B */
+    /* pacing: the loader passes the open menu's busy flag (pad[57]: 0 none, 1 ready, 2 animating a move). A press is held until the
+       menu turns busy (it took it) or 60 ms; the next one goes as soon as it is ready again. Where the selection is going is kept
+       here (g_mm.exp), so a step does not wait for the highlight's fade to show; the screen corrects it whenever it is steady. */
+    static s32 exp = -1; static u32 seen_busy;
+    u32 now = GetTickCount(); keys[0x88] = keys[0x89] = keys[0x8A] = keys[0x8B] = 0; u32 st = g_r ? g_r->pad[57] : 0;
+    if (g_mm.pressing) { if (st == 2) seen_busy = 1; if (now - g_mm.tp < 60 && !seen_busy) { keys[g_mm.key] = 1; return; } if (now - g_mm.tp < 30) { keys[g_mm.key] = 1; return; }
+        g_mm.pressing = 0; g_mm.tr = now; g_mm.fr = g_mo_frame; return; }
+    if (g_mm.tr && now - g_mm.tr < 400 && (st == 2 || now - g_mm.tr < 90)) return;   /* still animating the last move (the busy flag did not show on every menu: at least 90 ms) */
+    if (g_mm.tr && (g_mm.key == 0x8A || g_mm.key == 0x8B) && now - g_mm.tr < 600) return;   /* after A / B: let the next screen come up */
+    if (g_sel_now >= 0 && g_sel_steady >= 1 && (!g_mm.tr || now - g_mm.tr > 150)) exp = g_sel_now;   /* the screen, when it is settled */
+    if (exp >= (s32)g_mon) exp = -1;
+    int key = 0;
+    if (g_mm.pend_b) { g_mm.pend_b = 0; key = 0x8B; }
+    else {
+        if (g_mm.pend_a && now - g_mm.ta > 2500) g_mm.pend_a = 0;
+        s32 tgt = menu_under_mouse(), sel = exp >= 0 ? exp : g_sel_now;
+        if (tgt < 0) { g_mm.pend_a = 0; g_mm.hover = 0; return; }   /* not on an option: nothing to follow */
+        if (sel < 0) return;
+        if (tgt != sel && g_mm.hover) { if (++g_mm.steps > g_mon + 3) { g_mm.hover = 0; g_mm.pend_a = 0; return; } key = tgt > sel ? 0x89 : 0x88; exp = sel + (tgt > sel ? 1 : -1); }   /* (a menu this misreads: give up) */
+        else if (tgt == sel) { if (g_mm.pend_a && g_sel_now == sel && g_sel_steady >= 1) { g_mm.pend_a = 0; g_mm.hover = 0; key = 0x8A; } else if (!g_mm.pend_a) g_mm.hover = 0; }
+        else return; }
+    if (key) { g_mm.key = key; g_mm.pressing = 1; g_mm.tp = now; seen_busy = 0; keys[key] = 1; }
+    {   /* menulog.txt: every decision -> menu_mouse_log.txt (time, options, under the arrow, selected on screen, steady, expected, busy, key) */
+        static u32 on, tl, lastsig; if (now - tl > 1000) { tl = now; on = GetFileAttributesA("menulog.txt") != 0xFFFFFFFF; }
+        s32 tgt = menu_under_mouse(); u32 sig = (u32)tgt * 7 + (u32)g_sel_now * 131 + (u32)exp * 1009 + st * 5 + key * 31 + g_mon * 7919;
+        if (on && sig != lastsig) { lastsig = sig; s32 vals[10] = {(s32)(now % 100000), (s32)g_mon, tgt, g_sel_now, (s32)g_sel_steady, exp, (s32)st, key, g_mm.x, g_mm.y}; char tx[160]; u32 q = 0;
+            for (int z = 0; z < 10; z++) { s32 vv = vals[z]; if (vv < 0) { tx[q++] = '-'; vv = -vv; } char d[12]; int zz = 0; do d[zz++] = (char)(0x30 + vv % 10); while (vv /= 10); while (zz) tx[q++] = d[--zz]; tx[q++] = 0x20; } tx[q++] = 0x0D; tx[q++] = 0x0A;
+            HANDLE fh = CreateFileA("menu_mouse_log.txt", 0x04, 1, 0, 4, 0x80, 0); if (fh != (HANDLE)-1) { DWORD w; WriteFile(fh, tx, q, &w, 0); CloseHandle(fh); } } } }
 static void do_draw_imm(u32 mode, u32 n, f32 *v) {
+    menu_glyph(mode, n, v);
     if (n == 4 && g_r->pad[54]) {   /* Milestone 90: the reticle (a 64x64 quad centred at 320, 192) is scaled about its centre by pad[54] / 1000 (hip fire large, aiming small) */
         f32 x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f; for (u32 k = 0; k < 4; k++) { f32 *q = v + k * 64; if (q[0] < x0) x0 = q[0]; if (q[0] > x1) x1 = q[0]; if (q[1] < y0) y0 = q[1]; if (q[1] > y1) y1 = q[1]; }
         f32 cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f, w = x1 - x0, h = y1 - y0;
@@ -1197,6 +1283,15 @@ static void do_draw_imm(u32 mode, u32 n, f32 *v) {
                     #undef HX
                     tx[q++] = 0x0D; tx[q++] = 0x0A;
                     HANDLE fh = CreateFileA("radar_log.txt", 0x04, 1, 0, 4, 0x80, 0); if (fh != (HANDLE)-1) { DWORD w; WriteFile(fh, tx, q, &w, 0); CloseHandle(fh); } } } } }
+    {   /* probe (menutext.txt): draws with the 128x256 font sheet: bounding box, vertices, the diffuse colour (attribute 3) -> menu_text_log.txt, one frame every 2 s */
+        static u32 on, tl, tlog, frame_tag; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; on = GetFileAttributesA("menutext.txt") != 0xFFFFFFFF; }
+        TI t; if (on && n >= 4 && ((K(0x1B0C) >> 30) & 1) && tex_info(0, &t)) {
+            if (now - tlog > 2000) { tlog = now; frame_tag = g_frame; }
+            if (g_frame == frame_tag) { f32 x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f; for (u32 k = 0; k < n; k++) { f32 *q = v + k * 64; if (q[0] < x0) x0 = q[0]; if (q[0] > x1) x1 = q[0]; if (q[1] < y0) y0 = q[1]; if (q[1] > y1) y1 = q[1]; }
+                f32 *c = v + 3 * 4; u32 vals[13] = {g_frame, mode, n, (u32)x0, (u32)y0, (u32)x1, (u32)y1, (u32)(c[0] * 255), (u32)(c[1] * 255), (u32)(c[2] * 255), t.w, t.h, t.off}; char tx[240]; u32 q = 0;
+                for (int z = 0; z < 13; z++) { u32 vv = vals[z]; char d[12]; int zz = 0; do d[zz++] = (char)(0x30 + vv % 10); while (vv /= 10); while (zz) tx[q++] = d[--zz]; tx[q++] = 0x20; }
+                { u32 vv = (u32)(c[3] * 255); char d[12]; int zz = 0; do d[zz++] = (char)(0x30 + vv % 10); while (vv /= 10); while (zz) tx[q++] = d[--zz]; } tx[q++] = 0x0D; tx[q++] = 0x0A;
+                HANDLE fh = CreateFileA("menu_text_log.txt", 0x04, 1, 0, 4, 0x80, 0); if (fh != (HANDLE)-1) { DWORD w; WriteFile(fh, tx, q, &w, 0); CloseHandle(fh); } } } }
     hud_move(v, n, 64, mode);
     zcount_draw(mode, n);
     PROG *p; if (mode < 1 || mode > 10 || !vsh_setup(&p)) { g_r->pad[1]++; return; }
@@ -1340,6 +1435,7 @@ static void present_tex(GLuint tex, u32 w, u32 h) {
     if (g_pprog == 0xFFFFFFFF) {   /* no shader: the old blit, into the 4:3 area */
         glBlitFramebuffer(0, 0, w, h, dx, dy + dh, dx + dw, dy, 0x4000, 0x2601); return; }
     glDisable(0x0B71); glDisable(0x0BE2); glDisable(0x0B44); glDisable(0x0B90); glDisable(0x0BC0); glDisable(0x8037);   /* depth, blend, cull, stencil, alpha test, polygon offset */
+    if (!g_present_movie) { g_scr[0] = dx; g_scr[1] = dy; g_scr[2] = dw; g_scr[3] = dh; g_scr[4] = cw; g_scr[5] = ch; }   /* Milestone 103: for mouse clicks */
     glViewport(dx, dy, dw, dh); glUseProgram(g_pprog);
     glActiveTexture(0x84C0); glBindTexture(0x0DE1, tex); glTexParameteri(0x0DE1, 0x2800, 0x2601); glTexParameteri(0x0DE1, 0x2801, 0x2601);
     glTexParameteri(0x0DE1, 0x2802, 0x812F); glTexParameteri(0x0DE1, 0x2803, 0x812F);
@@ -1452,6 +1548,7 @@ static void do_flip(u32 addr) {
         static u32 tl, lag; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; lag = GetFileAttributesA("zlag.txt") != 0xFFFFFFFF; }
         zq_poll(!lag); }
     probe_flip();   /* Milestone 102: the camera-collision probe of this frame */
+    menu_flip();    /* Milestone 103: the menu options drawn this frame */
     if (!(addr & 0x03FFFFFF)) {   /* no display address yet (before AvSetDisplayMode): black, not memory at address 0 */
         glBindFramebuffer(0x8D40, 0); glDisable(0x0C11); glClearColor(0, 0, 0, 1); glClear(0x4000); SwapBuffers(g_dc); g_state_ok = 0; state_cache_reset(); return; }
     FB *f = fb_by_color(addr); g_r->pad[4]++;   /* diagnostics (Milestone 86): flips, memory presents, FBO presents, throttled, slowest present (us) */
