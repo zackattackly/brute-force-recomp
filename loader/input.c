@@ -534,53 +534,13 @@ static void cam_build(u8 *cam) {
       u32 *pd = gpu_pad(); if (pd) { pd[54] = (u32)((0.8f + 0.45f * (1.0f - g_aim_t)) * 1000.0f); pd[55] = GetTickCount() | 1; } }   /* pad[55]: gameplay heartbeat (the viewer moves the HUD into the corners only in gameplay, not in menus) */   /* hip 1.25, aiming 0.8 */   /* reticle scale for the viewer (Milestone 90) */
     for (int k = 0; k < 3; k++) g_cam_state[k] += (goal[k] - g_cam_state[k]) * ease;
     float eye[3]; for (int k = 0; k < 3; k++) eye[k] = pos[k] + (k == 1 ? g_cam_state[1] : 0.0f) + r[k] * g_cam_state[2] + b[k] * g_cam_state[0];
-    {   /* Milestone 94: camera collision. The game's world raycast 0xDDD10 (eax = 0; stack: world [char+8], out distance,
-           out point, out normal, start, unit direction, ray filter, range, 0; pops its arguments; returns the hit object or 0),
-           with the ray filter of 0x13DEC0 (vtable 0x39CC20) ignoring the player. From the pivot (the character at camera
-           height) toward the eye: a hit pulls the camera in front of it at once; it eases back out. nocamcollide.txt = off */
-        static u32 off = 2; if (off == 2) off = GetFileAttributesA("camcollide.txt") == 0xFFFFFFFF;   /* unfinished (the ray never hits walls yet): opt-in */
-        static float cur_d = -1; float st[3] = {pos[0], pos[1] + g_cam_state[1], pos[2]}, dv[3] = {eye[0] - st[0], eye[1] - st[1], eye[2] - st[2]};
-        float L; { float l2 = dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]; __asm__("fsqrt" : "=t"(L) : "0"(l2)); }
-        if (!off && L > 0.2f) { for (int k = 0; k < 3; k++) dv[k] /= L;
-            static u8 filt[0x140]; static int filt_ok;   /* built once: the ray code keeps state in it (rebuilt every frame, it never hit) */
-            if (!filt_ok) { filt_ok = 1; for (int i = 0; i < 0x140; i++) filt[i] = 0;
-            *(u32 *)filt = 0x394848; *(u32 *)(filt + 0x104) = 0; filt[0x108] = 1; *(s32 *)(filt + 0x10C) = -8; *(s32 *)(filt + 0x110) = 0; *(u32 *)(filt + 0x114) = 0; *(s32 *)(filt + 0x11C) = -1; }   /* the bullets' ray filter (0x230040) */
-            {   u32 x = *(u32 *)(c + 0x6C); if (x > 0x10000 && x < 0x7FFE0000u && readable((void *)x, 0x14) && *(u32 *)(x + 0x10)) x = *(u32 *)(x + 8); *(u32 *)(filt + 0x118) = x; }
-            float hd = 0, hp[3] = {0, 0, 0}, hn[3] = {0, 0, 0}, range = L + 0.3f; u32 world = *(u32 *)(c + 8), hit = 0;
-            if (world > 0x10000 && world < 0x7FFE0000u) {
-                float st2[3] = {st[0] + dv[0] * 0.5f, st[1] + dv[1] * 0.5f, st[2] + dv[2] * 0.5f}; range -= 0.5f;   /* start outside his body: a ray starting inside his collision found nothing */
-                u32 a[9] = {world, (u32)&hd, (u32)hp, (u32)hn, (u32)st2, (u32)dv, (u32)filt, *(u32 *)&range, 0};   /* a1 .. a9 */
-                __asm__ volatile("pushl 32(%%esi)\n\t pushl 28(%%esi)\n\t pushl 24(%%esi)\n\t pushl 20(%%esi)\n\t pushl 16(%%esi)\n\t pushl 12(%%esi)\n\t pushl 8(%%esi)\n\t pushl 4(%%esi)\n\t pushl 0(%%esi)\n\t"
-                    "xorl %%eax, %%eax\n\t movl $0xDDD10, %%ecx\n\t call *%%ecx" : "=a"(hit) : "S"(a) : "ecx", "edx", "memory", "cc"); }
-            u32 rhit = 0; float rhd = 0;   /* probe: the same segment cast backwards (eye -> pivot): one-sided walls? */
-            if (world > 0x10000 && world < 0x7FFE0000u) { float rp[3], rn[3], rs[3] = {eye[0] + dv[0] * 0.3f, eye[1] + dv[1] * 0.3f, eye[2] + dv[2] * 0.3f}, rd[3] = {-dv[0], -dv[1], -dv[2]}, rr = L - 0.2f;
-                u32 a[9] = {world, (u32)&rhd, (u32)rp, (u32)rn, (u32)rs, (u32)rd, (u32)filt, *(u32 *)&rr, 0};
-                __asm__ volatile("pushl 32(%%esi)\n\t pushl 28(%%esi)\n\t pushl 24(%%esi)\n\t pushl 20(%%esi)\n\t pushl 16(%%esi)\n\t pushl 12(%%esi)\n\t pushl 8(%%esi)\n\t pushl 4(%%esi)\n\t pushl 0(%%esi)\n\t"
-                    "xorl %%eax, %%eax\n\t movl $0xDDD10, %%ecx\n\t call *%%ecx" : "=a"(rhit) : "S"(a) : "ecx", "edx", "memory", "cc"); }
-            {   /* probe: does the game's own follow camera (it runs first, starting from our last eye) pull its eye in at walls? */
-                u8 *cam_block(u8 *); u8 *blk = cam_block(cam); float gd = -1, gm = -1;
-                if (blk && readable(blk + 0x238, 12)) { float *ge = (float *)(blk + 0x238), q[3] = {ge[0] - st[0], ge[1] - st[1], ge[2] - st[2]}, m[3] = {ge[0] - g_eye_ours[0], ge[1] - g_eye_ours[1], ge[2] - g_eye_ours[2]};
-                    float s2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2], m2 = m[0] * m[0] + m[1] * m[1] + m[2] * m[2]; __asm__("fsqrt" : "=t"(gd) : "0"(s2)); __asm__("fsqrt" : "=t"(gm) : "0"(m2)); }
-                static u32 tl2; u32 nw2 = GetTickCount(); if (nw2 - tl2 > 1000 || ((hit || rhit) && nw2 - tl2 > 250)) { tl2 = nw2; out("  [camray] len "); fo(L); out("fwd "); hex(hit); out(" d "); fo(hd); out("back "); hex(rhit); out(" d "); fo(rhd);
-                    out("game eye dist "); fo(gd); out("moved "); fo(gm); out("pos "); fo(st[0]); fo(st[1]); fo(st[2]); out("\r\n"); } }
-            {   /* probe: a ray straight ahead (camera forward, 60 m, from 1 m in front of the pivot) and one straight down (control: the ground hit before) */
-                static u32 tl3; u32 nw3 = GetTickCount();
-                if (nw3 - tl3 > 1000 && world > 0x10000 && world < 0x7FFE0000u) { tl3 = nw3; u32 fh = 0, dh = 0; float fd = 0, dd = 0, p1[3], n1[3];
-                    float fs[3] = {st[0] - b[0] * 1.0f, st[1] - b[1] * 1.0f, st[2] - b[2] * 1.0f}, fdir[3] = {-b[0], -b[1], -b[2]}, fr = 60.0f;
-                    u32 a[9] = {world, (u32)&fd, (u32)p1, (u32)n1, (u32)fs, (u32)fdir, (u32)filt, *(u32 *)&fr, 0};
-                    __asm__ volatile("pushl 32(%%esi)\n\t pushl 28(%%esi)\n\t pushl 24(%%esi)\n\t pushl 20(%%esi)\n\t pushl 16(%%esi)\n\t pushl 12(%%esi)\n\t pushl 8(%%esi)\n\t pushl 4(%%esi)\n\t pushl 0(%%esi)\n\t"
-                        "xorl %%eax, %%eax\n\t movl $0xDDD10, %%ecx\n\t call *%%ecx" : "=a"(fh) : "S"(a) : "ecx", "edx", "memory", "cc");
-                    float ds[3] = {fs[0], fs[1], fs[2]}, ddir[3] = {0, -1, 0}, dr = 20.0f;
-                    u32 a2[9] = {world, (u32)&dd, (u32)p1, (u32)n1, (u32)ds, (u32)ddir, (u32)filt, *(u32 *)&dr, 0};
-                    __asm__ volatile("pushl 32(%%esi)\n\t pushl 28(%%esi)\n\t pushl 24(%%esi)\n\t pushl 20(%%esi)\n\t pushl 16(%%esi)\n\t pushl 12(%%esi)\n\t pushl 8(%%esi)\n\t pushl 4(%%esi)\n\t pushl 0(%%esi)\n\t"
-                        "xorl %%eax, %%eax\n\t movl $0xDDD10, %%ecx\n\t call *%%ecx" : "=a"(dh) : "S"(a2) : "ecx", "edx", "memory", "cc");
-                    u32 *pd = gpu_pad(); out("  [camfwd] ahead "); hex(fh); out(" d "); fo(fd); out("down "); hex(dh); out(" d "); fo(dd); out("reticle depth raw "); hex(pd ? pd[50] : 0); out("\r\n"); } }
-            if (!hit && rhit) { hit = rhit; hd = (L + 0.3f - rhd) - 0.5f; if (hd < 0) hd = 0; }   /* a back hit rhd from its start (0.3 m past the eye): as a distance from the forward start (0.5 m out) */
-            float want = L; if (hit) { float hl = 0.5f + hd; want = hl - 0.3f;   /* hd: distance from the ray start */ if (want < 0.35f) want = 0.35f; if (want > L) want = L; }
-            if (cur_d < 0 || want < cur_d) cur_d = want; else { float e2 = dt * 4.0f; if (e2 > 1) e2 = 1; cur_d += (want - cur_d) * e2; }
-            for (int k = 0; k < 3; k++) eye[k] = st[k] + dv[k] * cur_d;
-            { static u32 tl, nh; u32 nw = GetTickCount(); if (hit && nh < 6 && nw - tl > 1000) { tl = nw; nh++; out("  [camhit] hit "); hex(hit); out(" dist out "); fo(hd); out("point - start "); fo(hp[0] - st[0]); fo(hp[1] - st[1]); fo(hp[2] - st[2]); out("camera at "); fo(cur_d); out("of "); fo(L); out("\r\n"); } } } }
+    float eye_want[3] = {eye[0], eye[1], eye[2]}, st_pivot[3] = {pos[0], pos[1] + g_cam_state[1], pos[2]};
+    {   /* Milestone 102: camera collision through the viewer (the game's world raycast 0xDDD10 never saw the walls, Milestone 94):
+           the viewer draws the solid surfaces into a small depth view from the pivot toward the camera and sends back the
+           nearest distance (RING pad[80]); the camera stops in front of it at once and eases back out. nocamcollide.txt = off */
+        void cam_collide(const float *st, float *eye, float dt); cam_collide(st_pivot, eye, dt); }
     for (int k = 0; k < 3; k++) { g_eye_ours[k] = eye[k]; g_cr[k] = r[k]; g_cu[k] = u[k]; g_cb[k] = b[k]; }
+    { void cam_probe_send(const float *st, const float *eye_want); cam_probe_send(st_pivot, eye_want); }   /* the probe for the next frames, with this frame's final camera */
     {   /* Milestone 93 test (partmove.txt): lift both hand parts (+0x3F8, +0x3FC) by 0.6 m - does the drawn mesh follow? */
         static u32 on = 2; if (on == 2) on = GetFileAttributesA("partmove.txt") != 0xFFFFFFFF;
         if (on) for (int h = 0; h < 2; h++) { u8 *p = *(u8 **)(c + 0x3F8 + h * 4); int part_like(u8 *, float *); if (part_like(p, pos)) ((float *)(p + 0x38))[1] += 0.6f; } }
@@ -899,6 +859,55 @@ void vp_watch(const float *M) {
         if (n < 400 && (lp == 0 || p11 > lp * 1.02f || p11 < lp * 0.98f)) { n++; lp = p11; out("  [fov] P00 "); fo(pm[0]); out("P11 "); fo(pm[5]); out("sprint "); dec(g_sprinting);
             if (g_cam_obj && readable(g_cam_obj, 0x400)) { out(" cam"); for (u32 o = 0; o < 0x400; o += 4) { float f = *(float *)(g_cam_obj + o); if (f > 0.2f && f < 3.2f) { out(" +"); hex(o); out("="); fo(f); } } }
             out("\r\n"); } } }
+/* Milestone 102: camera collision through the viewer.
+   cam_probe_send: every 3D vertex the game draws comes out of its vertex program as o0 = screen position (x, y in pixels of
+   the 640x480 frame, y down) and w = depth along the camera (the projection caught by vp_watch, P = M x inverse(our view)).
+   The viewer forms in = (gl_x * w, gl_y * w, w, 1) from it (gl_x, gl_y: the frame's NDC, gl_y up); this matrix takes that
+   back to the world (view = A in, world = inverse(V) view) and on into the probe's clip space (a GL camera at the pivot,
+   looking at where the camera wants to be, 10 degrees wide). RING pad: [60] sequence (odd while written), [61] on,
+   [62] near, [63] far, [64..79] the matrix (row-major), [80] the distance the viewer found, [81] its counter. */
+static float sqrt_(float x);
+static void mul4(const float *a, const float *b, float *o) { for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) { float s = 0; for (int k = 0; k < 4; k++) s += a[r * 4 + k] * b[k * 4 + c]; o[r * 4 + c] = s; } }
+#define PROBE_TAN 0.0875f   /* tan(5 degrees): half the probe's view */
+#define PROBE_NEAR 0.7f     /* the pivot sits inside the player's own body (and gun) */
+void cam_probe_send(const float *st, const float *eye_want) {
+    u32 *pd = gpu_pad(); if (!pd) return;
+    static u32 off = 2; if (off == 2) off = GetFileAttributesA("nocamcollide.txt") != 0xFFFFFFFF;
+    if (off || !g_proj_t) { pd[61] = 0; return; }
+    const float *P = g_projB[g_proj_i & 1]; float P00 = P[0], P11 = P[5], P02 = P[2], P12 = P[6], P32 = P[14], P33 = P[15];
+    if (P00 > -1e-4f && P00 < 1e-4f) return; if (P11 > -1e-4f && P11 < 1e-4f) return; if (P32 > -1e-4f && P32 < 1e-4f) return;
+    float A[16] = {1.0f / P00, 0, -(P02 / P00) / P32, (P02 / P00) * P33 / P32,
+                   0, -1.0f / P11, -(P12 / P11) / P32, (P12 / P11) * P33 / P32,
+                   0, 0, 1.0f / P32, -P33 / P32,
+                   0, 0, 0, 1};
+    /* (y: gl_y = -m_y, the frame's rows run down: m_y w = -in.y, so y_view = (-in.y - P12 z) / P11) */
+    float V[16], iV[16]; our_view(V); if (!inv4(V, iV)) return;
+    float f[3] = {eye_want[0] - st[0], eye_want[1] - st[1], eye_want[2] - st[2]}, L = sqrt_(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]); if (L < 0.5f) { pd[61] = 0; return; }
+    for (int k = 0; k < 3; k++) f[k] /= L;
+    float up[3] = {0, 1, 0}; if (f[1] > 0.95f || f[1] < -0.95f) { up[0] = 1; up[1] = 0; }
+    float s[3] = {f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2], f[0] * up[1] - f[1] * up[0]}, sl = sqrt_(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]); for (int k = 0; k < 3; k++) s[k] /= sl;
+    float u[3] = {s[1] * f[2] - s[2] * f[1], s[2] * f[0] - s[0] * f[2], s[0] * f[1] - s[1] * f[0]};
+    float Vp[16] = {s[0], s[1], s[2], -(s[0] * st[0] + s[1] * st[1] + s[2] * st[2]),
+                    u[0], u[1], u[2], -(u[0] * st[0] + u[1] * st[1] + u[2] * st[2]),
+                    -f[0], -f[1], -f[2], f[0] * st[0] + f[1] * st[1] + f[2] * st[2],
+                    0, 0, 0, 1};
+    float n = PROBE_NEAR, fa = L + 0.6f, t = 1.0f / PROBE_TAN;
+    float Pp[16] = {t, 0, 0, 0,  0, t, 0, 0,  0, 0, -(fa + n) / (fa - n), -2.0f * fa * n / (fa - n),  0, 0, -1, 0};
+    float T1[16], T2[16], M[16]; mul4(Pp, Vp, T1); mul4(T1, iV, T2); mul4(T2, A, M);
+    u32 sq = pd[60] | 1; pd[60] = sq; __sync_synchronize();
+    for (int k = 0; k < 16; k++) pd[64 + k] = *(u32 *)&M[k];
+    pd[62] = *(u32 *)&n; pd[63] = *(u32 *)&fa; pd[61] = 1;
+    __sync_synchronize(); pd[60] = sq + 1; }
+void cam_collide(const float *st, float *eye, float dt) {
+    static u32 off = 2; if (off == 2) off = GetFileAttributesA("nocamcollide.txt") != 0xFFFFFFFF; if (off) return;
+    u32 *pd = gpu_pad(); if (!pd) return;
+    float dv[3] = {eye[0] - st[0], eye[1] - st[1], eye[2] - st[2]}, L = sqrt_(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]); if (L < 0.5f) return;
+    static u32 lastc, lastt; static float wall = 1e9f; u32 now = GetTickCount();
+    if (pd[81] != lastc) { lastc = pd[81]; lastt = now; wall = *(float *)&pd[80]; }    float want = L; if (now - lastt < 400 && wall < L + 0.3f) { want = wall - 0.3f; if (want < 0.45f) want = 0.45f; if (want > L) want = L; }   /* a fresh measurement: stop 0.3 m in front of the surface */
+    static float cur = -1; if (cur < 0 || want < cur) cur = want; else { float e = dt * 3.0f; if (e > 1) e = 1; cur += (want - cur) * e; }   /* in at once, out gently */
+    if (cur > L) cur = L;
+    for (int k = 0; k < 3; k++) eye[k] = st[k] + dv[k] / L * cur;
+    { static u32 tl, nl; if (nl < 200 && cur < L - 0.05f && now - tl > 500) { tl = now; nl++; out("  [camcol] wall at "); fo(wall); out("camera at "); fo(cur); out("of "); fo(L); out("\r\n"); } } }
 static u32 g_rng = 12345; static float frand(void) { g_rng = g_rng * 1664525u + 1013904223u; return (float)(g_rng >> 8) / 16777216.0f; }
 static float sqrt_(float x) { float r; __asm__("fsqrt" : "=t"(r) : "0"(x)); return r; }
 static float sin_(float x) { float r; __asm__("fsin" : "=t"(r) : "0"(x)); return r; }

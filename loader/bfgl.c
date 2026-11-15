@@ -516,10 +516,10 @@ static const char *g_fs =
 "  o_col = vec4(rgb, ga);\n"
 "}\n";
 static GLuint g_prog, g_vbo, g_vao;
-static GLint u_vp, u_tmode, u_tscale, u_nst, u_muxmsb, u_crg, u_crep, u_cmap, u_arg, u_aal, u_amap, u_cdst, u_adst, u_op, u_f0, u_f1, u_fog, u_fa, u_fb, u_frep, u_finv, u_atest, u_c, u_fogp, u_fogon, u_shadow, u_zscale, u_sbias, u_hud;
+static GLint u_vp, u_tmode, u_tscale, u_nst, u_muxmsb, u_crg, u_crep, u_cmap, u_arg, u_aal, u_amap, u_cdst, u_adst, u_op, u_f0, u_f1, u_fog, u_fa, u_fb, u_frep, u_finv, u_atest, u_c, u_fogp, u_fogon, u_shadow, u_zscale, u_sbias, u_hud, u_pr, u_pon;
 /* one linked program: its uniform locations (copied into the globals above when it is used) */
-typedef struct { u32 key, used, cgen, ustate; GLuint id; GLint loc[29]; f32 hud[2]; } PROG;   /* ustate: hash of the state its uniforms were set for */   /* cgen: the constants generation it last got */   /* hud: the u_hud it holds */
-#define ULIST(X) X(u_vp) X(u_tmode) X(u_tscale) X(u_nst) X(u_muxmsb) X(u_crg) X(u_crep) X(u_cmap) X(u_arg) X(u_aal) X(u_amap) X(u_cdst) X(u_adst) X(u_op) X(u_f0) X(u_f1) X(u_fog) X(u_fa) X(u_fb) X(u_frep) X(u_finv) X(u_atest) X(u_c) X(u_fogp) X(u_fogon) X(u_shadow) X(u_zscale) X(u_sbias) X(u_hud)
+typedef struct { u32 key, used, cgen, ustate; GLuint id; GLint loc[31]; f32 hud[2]; } PROG;   /* ustate: hash of the state its uniforms were set for */   /* cgen: the constants generation it last got */   /* hud: the u_hud it holds */
+#define ULIST(X) X(u_vp) X(u_tmode) X(u_tscale) X(u_nst) X(u_muxmsb) X(u_crg) X(u_crep) X(u_cmap) X(u_arg) X(u_aal) X(u_amap) X(u_cdst) X(u_adst) X(u_op) X(u_f0) X(u_f1) X(u_fog) X(u_fa) X(u_fb) X(u_frep) X(u_finv) X(u_atest) X(u_c) X(u_fogp) X(u_fogon) X(u_shadow) X(u_zscale) X(u_sbias) X(u_hud) X(u_pr) X(u_pon)
 /* Milestone 96: the 2D HUD in a widescreen window. Screen-space vertices (w == 1) are squeezed horizontally by u_hud.x (= 4:3 / window
    aspect) about the x u_hud.y: 0, 320 or 640 by the screen third the draw's centre is in, so each piece keeps its shape and its side of
    the screen, and the pieces of one element (the radar and its dots) stay together. 3D vertices are never touched. nohudfix.txt = off. */
@@ -837,7 +837,7 @@ static void src_op(const u32 *w, int p) {
 static void wr(const char *dst, u32 mask, const char *val) { if (!mask) return; ap(dst); ap(g_mask[mask]); ap(" = "); ap(val); ap(g_mask[mask]); ap(";\n"); }
 static int gen_vsh(void) {
     g_srcn = 0;
-    ap("#version 130\nin vec4 v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12,v13,v14,v15;\nuniform vec4 u_c[192]; uniform vec4 u_vp; uniform vec2 u_hud;\nout vec4 v_d0, v_d1, v_t0, v_t1, v_t2, v_t3; out float v_fogc;\n");
+    ap("#version 130\nin vec4 v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12,v13,v14,v15;\nuniform vec4 u_c[192]; uniform vec4 u_vp; uniform vec2 u_hud; uniform vec4 u_pr[4]; uniform vec4 u_pon;\nout vec4 v_d0, v_d1, v_t0, v_t1, v_t2, v_t3; out float v_fogc;\n");
     ap("void main() {\nvec4 r0=vec4(0.0),r1=r0,r2=r0,r3=r0,r4=r0,r5=r0,r6=r0,r7=r0,r8=r0,r9=r0,r10=r0,r11=r0,r12=r0,r13=r0,r14=r0,r15=r0;\n");
     ap("vec4 o0=vec4(0,0,0,1),o1=o0,o2=o0,o3=o0,o4=o0,o5=o0,o6=o0,o7=o0,o8=o0,o9=o0,o10=o0,o11=o0,o12=o0,o13=o0,o14=o0,o15=o0; int a0=0; vec4 A,B,C,m,l; float s;\n");
     static const u8 macneed[16] = {0, 1, 3, 5, 7, 3, 3, 3, 3, 3, 3, 3, 3, 1, 0, 0};
@@ -878,6 +878,10 @@ static int gen_vsh(void) {
     ap("float kx = (u_vp.w > 0.0 && abs(w - 1.0) > 1e-5) ? u_vp.w : 1.0;\n");
     ap("float hx = o0.x; if (u_hud.x > 0.0 && abs(w - 1.0) <= 1e-5) hx = u_hud.y + (hx - u_hud.y) * u_hud.x;\n");   /* Milestone 96: the HUD in widescreen (screen-space vertices only) */
     ap("gl_Position = vec4(vec3((hx*u_vp.x-1.0)*kx, o0.y*u_vp.y-1.0, o0.z*u_vp.z-1.0)*w, w);\n");
+    /* Milestone 102: the camera-collision probe (u_pon.x = 1): (gl_x w, gl_y w, w, 1) of the frame's own camera -> the probe's clip space
+       (input.c cam_probe_send builds u_pr); screen-space vertices (w == 1: HUD, effect quads) are put outside the view */
+    ap("if (u_pon.x > 0.5) { vec4 pin = vec4((o0.x*u_vp.x-1.0)*w, (o0.y*u_vp.y-1.0)*w, w, 1.0);\n"
+       "  gl_Position = abs(w - 1.0) <= 1e-5 ? vec4(2.0, 2.0, 2.0, 1.0) : vec4(dot(u_pr[0], pin), dot(u_pr[1], pin), dot(u_pr[2], pin), dot(u_pr[3], pin)); }\n");
     ap("v_d0 = o3; v_d1 = o4; v_t0 = o9; v_t1 = o10; v_t2 = o11; v_t3 = o12; v_fogc = o5.x;\n}\n");
     return n;
 }
@@ -1019,6 +1023,52 @@ static int razor_draw(u32 mode, u32 n, u32 nv, u32 mn, u32 mx, f32 *inl) {   /* 
     glDrawArrays(4 /* TRIANGLES */, 0, g_rz_n);
     if (tx) { glBindTexture(0x0DE1, (GLuint)was); glDisableVertexAttribArray(9); }
     glBindVertexArray(g_vao); g_r->draws++; return 1; }
+/* ---- Milestone 102: the camera-collision probe ----
+   The loader (input.c cam_probe_send) puts a matrix in RING pad[64..79] each frame: a small view (16x16, 10 degrees) from the
+   player's pivot toward where the camera wants to be. Every solid 3D draw on the 640x480 screen (depth test and depth writes on,
+   no blending: not smoke, particles or the HUD) is drawn a second time into that view's depth buffer, with back-face culling
+   off (a one-sided wall the camera is behind still counts). At the flip the depth is read through two pixel-pack buffers (one
+   frame late, no stall); the nearest distance goes to pad[80], pad[81] counts the readings. */
+static GLuint g_pfbo, g_ptex[2], g_ppbo[2]; static u32 g_pon, g_pseq, g_pdrawn, g_ppi, g_ppend[2]; static f32 g_pm[16], g_pnf[2], g_pnf_at[2][2];
+static void probe_draw(int indexed, u32 mode, u32 n) {
+    if (!g_pon || !g_pfbo || !g_cur_fb || g_cur_fb->w != 640 || g_cur_fb->h != 480 || !K(0x30C) || !K(0x35C) || K(0x304) || u_pr < 0) return;
+    glBindFramebuffer(0x8D40, g_pfbo); glViewport(0, 0, 16, 16);
+    glDisable(0x0C11); glDisable(0x0B90); glDisable(0x0B44); glEnable(0x0B71); glDepthFunc(0x0201 /* LESS */); glDepthMask(1); glColorMask(0, 0, 0, 0);
+    glUniform4fv(u_pr, 4, g_pm); glUniform4f(u_pon, 1, 0, 0, 0);
+    if (indexed) glDrawElements(mode - 1, n, 0x1405, 0); else glDrawArrays(mode - 1, 0, n);
+    glUniform4f(u_pon, 0, 0, 0, 0); g_pdrawn = 1;
+    {   /* back to the game's own target and state (as apply_state sets them from the registers) */
+        u32 gs = g_cur_fb->gs ? g_cur_fb->gs : 1; glBindFramebuffer(0x8D40, g_cur_fb->fbo); glViewport(0, 0, g_cur_fb->w * gs, g_cur_fb->h * gs);
+        u32 hz = K(0x200), vt = K(0x204); glEnable(0x0C11); glScissor((hz & 0xFFFF) * gs, (vt & 0xFFFF) * gs, (hz >> 16) * gs, (vt >> 16) * gs);
+        glDepthFunc(K(0x354)); glDepthMask(1);
+        u32 cm = K(0x358); glColorMask((cm >> 16) & 1, (cm >> 8) & 1, cm & 1, (cm >> 24) & 1);
+        if (K(0x32C)) { glEnable(0x0B90); glStencilFunc(K(0x364), K(0x368) & 0xFF, K(0x36C) & 0xFF); glStencilOp(K(0x370), K(0x374), K(0x378)); glStencilMask(K(0x360) & 0xFF); }
+        if (K(0x308)) { glEnable(0x0B44); glCullFace(K(0x39C)); glFrontFace(K(0x3A0) == 0x900 ? 0x0901 : 0x0900); } } }
+static void probe_flip(void) {
+    {   static u32 tl, off; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; off = GetFileAttributesA("nocamcollide.txt") != 0xFFFFFFFF; }
+        u32 s = g_r->pad[60]; if (!(s & 1) && s != g_pseq) { g_pseq = s; for (int k = 0; k < 16; k++) g_pm[k] = *(f32 *)&g_r->pad[64 + k]; g_pnf[0] = *(f32 *)&g_r->pad[62]; g_pnf[1] = *(f32 *)&g_r->pad[63]; }
+        g_pon = !off && g_r->pad[61] && g_pseq; }
+    if (!g_pon && !g_pfbo) return;
+    if (!g_pfbo) {
+        glGenTextures(2, g_ptex);
+        glBindTexture(0x0DE1, g_ptex[0]); glTexImage2D(0x0DE1, 0, 0x8058, 16, 16, 0, 0x1908, 0x1401, 0); glTexParameteri(0x0DE1, 0x2800, 0x2600); glTexParameteri(0x0DE1, 0x2801, 0x2600);
+        glBindTexture(0x0DE1, g_ptex[1]); glTexImage2D(0x0DE1, 0, 0x81A6 /* DEPTH_COMPONENT24 */, 16, 16, 0, 0x1902, 0x1405, 0); glTexParameteri(0x0DE1, 0x2800, 0x2600); glTexParameteri(0x0DE1, 0x2801, 0x2600);
+        glBindTexture(0x0DE1, 0);
+        glGenFramebuffers(1, &g_pfbo); glBindFramebuffer(0x8D40, g_pfbo); glFramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, g_ptex[0], 0); glFramebufferTexture2D(0x8D40, 0x8D00 /* DEPTH */, 0x0DE1, g_ptex[1], 0);
+        glGenBuffers(2, g_ppbo); for (int k = 0; k < 2; k++) { glBindBuffer(0x88EB, g_ppbo[k]); glBufferData(0x88EB, 16 * 16 * 4, 0, 0x88E1); } glBindBuffer(0x88EB, 0);
+        g_pdrawn = 1; }   /* (cleared below) */
+    if (g_pdrawn) {   /* this frame's probe -> a pixel-pack buffer; last frame's -> the nearest distance */
+        glBindFramebuffer(0x8CA8, g_pfbo); glBindBuffer(0x88EB, g_ppbo[g_ppi]); glReadPixels(0, 0, 16, 16, 0x1902, 0x1406, 0);
+        g_ppend[g_ppi] = 1; g_pnf_at[g_ppi][0] = g_pnf[0]; g_pnf_at[g_ppi][1] = g_pnf[1];
+        u32 o = g_ppi ^ 1;
+        if (g_ppend[o]) { static f32 d[256]; glBindBuffer(0x88EB, g_ppbo[o]); glGetBufferSubData(0x88EB, 0, sizeof d, d); g_ppend[o] = 0;
+            f32 mn = 1.0f; for (int k = 0; k < 256; k++) if (d[k] < mn) mn = d[k];
+            f32 n = g_pnf_at[o][0], fa = g_pnf_at[o][1], dist = 1e9f;
+            if (mn < 0.99999f && fa > n) { f32 z = mn * 2.0f - 1.0f; dist = 2.0f * fa * n / (fa + n - z * (fa - n)); }
+            g_r->pad[80] = *(u32 *)&dist; __sync_synchronize(); g_r->pad[81]++; }
+        glBindBuffer(0x88EB, 0); g_ppi ^= 1;
+        glBindFramebuffer(0x8D40, g_pfbo); glDisable(0x0C11); glDepthMask(1); glClearDepth(1.0); glClear(0x0100); g_pdrawn = 0;
+        g_state_ok = 0; state_cache_reset(); } }
 static void do_draw_idx(u32 mode, u32 n, u32 mn, u32 mx, f32 *inl, u32 *idx) {
     zcount_draw(mode, n);
     PROG *p; if (mode < 1 || mode > 10 || mx < mn || mx - mn >= 262144) { g_r->pad[0]++; return; }
@@ -1097,6 +1147,7 @@ static void do_draw_idx(u32 mode, u32 n, u32 mn, u32 mx, f32 *inl, u32 *idx) {
     }    for (u32 k = 0; k < n; k++) g_idxb[k] = idx[k] - mn;
     glBindBuffer(0x8893, g_ibo); glBufferData(0x8893, n * 4, g_idxb, 0x88E0);
     glDrawElements(mode - 1, n, 0x1405 /* UNSIGNED_INT */, 0);
+    probe_draw(1, mode, n);   /* Milestone 102 */
     glBindVertexArray(g_vao); g_r->draws++;
 }
 static void hud_move(f32 *v, u32 n, u32 stride, u32 mode);
@@ -1155,6 +1206,7 @@ static void do_draw_imm(u32 mode, u32 n, f32 *v) {
     glBindVertexArray(g_vao2); glBindBuffer(0x8892, g_vbo2); glBufferData(0x8892, n * 256, v, 0x88E0);
     for (u32 i = 0; i < 16; i++) { glEnableVertexAttribArray(i); glVertexAttribPointer(i, 4, 0x1406, 0, 256, (void *)(i * 16)); }
     glDrawArrays(mode - 1, 0, n);
+    probe_draw(0, mode, n);   /* Milestone 102 */
     glBindVertexArray(g_vao); g_r->draws++;
 }
 /* Milestone 96: HUD layout. Screen-space draws (both 2D paths) lying wholly inside the radar's area or the health bars' area move
@@ -1399,6 +1451,7 @@ static void do_flip(u32 addr) {
            frames late made objects flicker: the game hides and shows them by these counts). zlag.txt (read every second) = no wait at the flip. */
         static u32 tl, lag; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; lag = GetFileAttributesA("zlag.txt") != 0xFFFFFFFF; }
         zq_poll(!lag); }
+    probe_flip();   /* Milestone 102: the camera-collision probe of this frame */
     if (!(addr & 0x03FFFFFF)) {   /* no display address yet (before AvSetDisplayMode): black, not memory at address 0 */
         glBindFramebuffer(0x8D40, 0); glDisable(0x0C11); glClearColor(0, 0, 0, 1); glClear(0x4000); SwapBuffers(g_dc); g_state_ok = 0; state_cache_reset(); return; }
     FB *f = fb_by_color(addr); g_r->pad[4]++;   /* diagnostics (Milestone 86): flips, memory presents, FBO presents, throttled, slowest present (us) */

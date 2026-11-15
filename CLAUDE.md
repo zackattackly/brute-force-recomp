@@ -121,7 +121,13 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   (0x230400). The red X (hitmarker_img.raw, 96x96 RGBA) is drawn by bfgl.c present_tex from RING pad[56] (pad is now 64
   words). nohitsound.txt / nohitmark.txt = off. Game objects live at
   0x80000000+: never range-test game pointers with < 0x7FFE0000 (that hid every hit).
-- Next: weapon poses (bone level), camera collision, START icon in HUD text draws black.
+- Milestone 102 (camera collision, works): the viewer measures it. input.c cam_probe_send puts a probe matrix in RING
+  pad[60..79] (pivot -> wanted eye, 10 degrees, near 0.7); every game vertex shader has a probe mode (u_pr/u_pon) that takes
+  (gl_x w, gl_y w, w, 1) back to the world and into the probe; bfgl.c probe_draw redraws solid 3D draws (depth test + writes,
+  no blend, 640x480 target) into a 16x16 depth FBO with culling off; probe_flip reads it back via PBOs -> pad[80] distance,
+  pad[81] counter; cam_collide stops the camera 0.3 m in front (in at once, out over ~1/3 s). nocamcollide.txt = off.
+  (The world raycast 0xDDD10 never hit walls from the camera: Milestone 94 is superseded.)
+- Next: weapon poses (bone level), START icon in HUD text draws black.
 - Semaphore releases (0x1D70) are now written to D3D's fence word, replacing the GET==PUT fence shortcut.
 - Test aids: `bench.txt` (renderer benchmark at start), `rbench.bat` (standalone), the `[profile]` log lines
   (ticker samples by bfcore RVA, look up in `bfcore.map`), `noviewer.txt`, `noxinput.txt`.

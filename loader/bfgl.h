@@ -40,5 +40,6 @@ typedef struct {
     volatile unsigned fence_done;                /* the last CMD_FENCE value drawn */
     volatile unsigned frames, draws;             /* viewer statistics */
     char info[256];                              /* the viewer's GL renderer string or error */
-    unsigned pad[64];                            /* [56]: the tick of the player's last hit (hit marker, Milestone 101) */
+    unsigned pad[96];                            /* [56]: the tick of the player's last hit (hit marker, Milestone 101);
+                                                    [60..81]: the camera-collision probe (Milestone 102, input.c cam_probe_send) */
 } RING;
