@@ -270,6 +270,18 @@ static void razor_play(s16 *pcm, u32 frames, VOICE *like) {
     if (like) { o->vol = like->vol; o->mode3d = like->mode3d; o->px = like->px; o->py = like->py; o->pz = like->pz; o->mind = like->mind; o->maxd = like->maxd; }
     else { o->vol = 1; o->mode3d = 2; }
     __sync_synchronize(); o->playing = 1; }
+/* Milestone 101: the hit marker - hitmarker.wav (16-bit stereo 48 kHz) when the player's shot hits a character (input.c);
+   its own 2 voices, not positioned (heard as the player's own). nohitsound.txt = off. */
+static s16 *g_hm; static u32 g_hmn, g_hm_state = 2; static VOICE *g_hmv[2];
+void snd_hitmarker(void) {
+    if (g_hm_state == 2) { g_hm_state = GetFileAttributesA("nohitsound.txt") == 0xFFFFFFFF;
+        if (g_hm_state) { g_hm = wav_load("hitmarker.wav", &g_hmn); if (!g_hm) g_hm_state = 0;
+            for (int i = 0; i < 2 && g_hm_state; i++) { VOICE *v = new_voice(); if (!v) break; v->fmt.tag = 1; v->fmt.ch = 2; v->fmt.rate = 48000; v->fmt.bits = 16; v->fmt.align = 4; v->mode3d = 2; g_hmv[i] = v; } }
+        out("  [hit] hit marker sound: "); if (g_hm_state) { dec(g_hmn); out(" frames\r\n"); } else out("off (no hitmarker.wav or nohitsound.txt)\r\n"); }
+    if (!g_hm_state) return;
+    static u32 rr; VOICE *o = g_hmv[rr++ & 1]; if (!o) o = g_hmv[0]; if (!o) return;
+    o->playing = 0; o->data = (u8 *)g_hm; o->bytes = g_hmn * 4; o->rstart = 0; o->rlen = 0; o->pos = 0; o->rate = 48000; o->looping = 0; o->paused = 0; o->vol = 1; o->mode3d = 2;
+    __sync_synchronize(); o->playing = 1; }
 void snd_razor_reload(void) { razor_snd_load(); if (!g_rz_snd) return; g_rz_mute = GetTickCount() + 3500; razor_play(g_rz_rel, g_rz_reln, 0); }
 static s32 NTAPI B_Play(void *b, u32 r1, u32 r2, u32 flags) { TR("B_Play"); VOICE *v = vo(b);
     if (v && v->fmt.tag == 0x69 && !(flags & 1)) { razor_snd_load();

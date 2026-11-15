@@ -1770,6 +1770,50 @@ __attribute__((naked)) static void widen_old1(void) { __asm__ volatile(
     "pushal\n\t pushl %eax\n\t call _cam_widen\n\t addl $4, %esp\n\t popal\n\t subl $0xc, %esp\n\t testl %ecx, %ecx\n\t pushl $0x6AB35\n\t ret"); }
 __attribute__((naked)) static void widen_old2(void) { __asm__ volatile(
     "pushal\n\t pushl %eax\n\t call _cam_widen\n\t addl $4, %esp\n\t popal\n\t subl $0xc, %esp\n\t flds 0x24(%eax)\n\t pushl $0x6AD06\n\t ret"); }
+/* Milestone 101: hit markers. The hitscan ray 0x230860 calls the bullet ray 0x230040(weapon, hardpoint, ?, ?, result,
+   &range) (stdcall, 6 arguments) at 0x2309ED; it returns the object hit and writes the character hit (if any) at result +0x34.
+   When the shooter is the player and a character other than the player was hit, the hit sound plays (dsound.c), at most
+   once per 70 ms (a shotgun's pellets give one sound). */
+static void hit_note(u8 *w, u32 hit, u32 path);
+static u32 (__stdcall *g_bray)(u32, u32, u32, u32, u32, u32) = (u32 (__stdcall *)(u32, u32, u32, u32, u32, u32))0x230040;
+u32 __stdcall bray_wrap(u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5) {
+    u32 r = g_bray(a0, a1, a2, a3, a4, a5);
+    /* the result: +0x34 the shooter, +0x44 the object hit (a character when [[obj +0xC] +4] == 3, as 0x2303A0 checks before
+       its body-part damage) */
+    if (r && a4 > 0x10000 && a4 < 0x7FFE0000u && readable((void *)(a4 + 0x44), 4)) { u32 hit = *(u32 *)(a4 + 0x44); if (hit) hit_note((u8 *)a0, hit, 1); }
+    return r; }
+/* the other bullet path (0x230400, 7 arguments, called at 0x2309CB; bullets that can pass through, up to arg6 hits): arg4 +4 /
+   +8 = a list of result records, each with the character hit at +0x34. The slots are cleared before the call, so a character
+   found there afterwards is a hit of this shot. */
+static u32 (__stdcall *g_bray2)(u32, u32, u32, u32, u32, u32, u32) = (u32 (__stdcall *)(u32, u32, u32, u32, u32, u32, u32))0x230400;
+static void hit_note(u8 *w, u32 hit, u32 path);
+u32 __stdcall bray2_wrap(u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6) {
+    u32 *rec = 0, n = 0;
+    if (a4 > 0x10000 && a4 < 0x7FFE0000u && readable((void *)(a4 + 4), 8)) { u32 b = *(u32 *)(a4 + 4), e = *(u32 *)(a4 + 8);
+        if (b > 0x10000 && e > b && e - b <= 64 && readable((void *)b, e - b)) { rec = (u32 *)b; n = (e - b) / 4; if (n > a6) n = a6; } }
+    u32 before[16]; if (n > 16) n = 16;   /* (each record's object hit at +0x44, as in the single-hit path; only a changed one is this shot's) */
+    for (u32 i = 0; i < n; i++) before[i] = rec[i] > 0x10000 && rec[i] < 0x7FFE0000u && readable((void *)(rec[i] + 0x44), 4) ? *(u32 *)(rec[i] + 0x44) : 0;
+    u32 r = g_bray2(a0, a1, a2, a3, a4, a5, a6);
+    for (u32 i = 0; i < n; i++) if (rec[i] > 0x10000 && rec[i] < 0x7FFE0000u && readable((void *)(rec[i] + 0x44), 4)) { u32 h = *(u32 *)(rec[i] + 0x44); if (h && h != before[i]) hit_note((u8 *)a0, h, 2); }
+    return r; }
+static void hit_note(u8 *w, u32 hit, u32 path) {
+    /* (game objects live at 0x80000000 and up: only readable() decides, no user-space range test) */
+    if (!g_player_char || hit == (u32)g_player_char || hit < 0x10000 || !readable((void *)(hit + 0xC), 4)) return;
+    {   u32 t = *(u32 *)(hit + 0xC); if (t < 0x10000 || !readable((void *)(t + 4), 4) || *(u32 *)(t + 4) != 3) return; }   /* a character ([[obj +0xC] +4] == 3, as the player) */
+    u8 *shooter = 0;
+    u32 a = w && readable(w + 0x1B0, 4) ? *(u32 *)(w + 0x1B0) : 0;
+    if (a > 0x10000 && a < 0x7FFE0000u && readable((void *)(a + 8), 4)) { u32 b = *(u32 *)(a + 8); if (b > 0x10000 && b < 0x7FFE0000u && readable((void *)(b + 0x1D4), 4)) shooter = *(u8 **)(b + 0x1D4); }
+    if (shooter != (u8 *)g_player_char) return;
+    {   /* a dead body is still a character: its health (character +0x54, a float; 20.5 -> 0 over five rifle hits in the probe) must
+           be above 0. The killing shot still counts: the last health seen per character is kept, and a hit that took it from above
+           0 to 0 is one (the damage may already be applied when the ray returns). */
+        if (!readable((void *)(hit + 0x54), 4)) return; float hp = *(float *)(hit + 0x54);
+        static u32 who[16]; static float seen[16]; static u32 rr; u32 k = 0; while (k < 16 && who[k] != hit) k++;
+        float before = k < 16 ? seen[k] : 1.0f; if (k == 16) { k = rr++ & 15; who[k] = hit; } seen[k] = hp;
+        if (!(hp > 0.0f) && !(before > 0.0f)) return; }
+    static u32 last; u32 now = GetTickCount(); if (now - last > 70) { last = now; void snd_hitmarker(void); snd_hitmarker(); }
+    { u32 *pd = gpu_pad(); if (pd && GetFileAttributesA("nohitmark.txt") == 0xFFFFFFFF) pd[56] = now | 1; }   /* the viewer draws the hit marker (bfgl.c) */
+    static u32 nl; if (nl < 20) { nl++; out("  [hit] player hit character "); hex(hit); out(path == 2 ? " (pass-through path)\r\n" : "\r\n"); } }
 void hs_fix(u32 *s) { aim_fix((u8 *)s[1], (float *)s[3], (float *)s[4]); }
 __attribute__((naked)) static void hs_stub(void) { __asm__ volatile(
     "pushal\n\t leal 32(%esp), %eax\n\t pushl %eax\n\t call _hs_fix\n\t addl $4, %esp\n\t popal\n\t pushl $0x230860\n\t ret"); }
@@ -1809,6 +1853,8 @@ void input_patch(void) {
         if (ok) { p[0] = 0xE9; *(u32 *)(p + 1) = (u32)body_stub - (0x11D7F7 + 5); for (int k = 5; k < 10; k++) p[k] = 0x90; out("Body turn hook: on\r\n"); } else out("Body turn hook: bytes differ\r\n"); }
     if (GetFileAttributesA("vsclog.txt") != 0xFFFFFFFF) { static const u8 e[6] = {0x56, 0x57, 0x8B, 0x3D, 0x40, 0xBD}; if (hook6(0x36F6C0, vsc_stub, e)) out("VS constant probe: on\r\n"); }
     {   static const u8 e[6] = {0x83, 0xEC, 0x60, 0x53, 0x32, 0xDB}; if (hook6(0x22F1D0, fb_stub, e)) out("Fire probe: on\r\n"); else out("Fire probe: bytes differ\r\n"); }
+    {   u8 *p = (u8 *)0x2309ED; if (p[0] == 0xE8 && (u32)(p + 5) + *(s32 *)(p + 1) == 0x230040) { *(s32 *)(p + 1) = (s32)((u32)bray_wrap - (0x2309ED + 5)); out("Hit marker hook: on\r\n"); } else out("Hit marker hook: bytes differ\r\n"); }
+    {   u8 *p = (u8 *)0x2309CB; if (p[0] == 0xE8 && (u32)(p + 5) + *(s32 *)(p + 1) == 0x230400) { *(s32 *)(p + 1) = (s32)((u32)bray2_wrap - (0x2309CB + 5)); out("Hit marker hook 2: on\r\n"); } else out("Hit marker hook 2: bytes differ\r\n"); }
     {   u8 *p = (u8 *)0x231868; if (p[0] == 0xE8 && (u32)(p + 5) + *(s32 *)(p + 1) == 0x230860) { *(s32 *)(p + 1) = (s32)((u32)hs_stub - (0x231868 + 5)); out("Hitscan aim hook: on\r\n"); } else out("Hitscan aim hook: bytes differ\r\n"); }
     {   u8 *p = (u8 *)0x12CA48; static const u8 e[9] = {0x8B, 0x4D, 0x08, 0xD9, 0x81, 0x78, 0x04, 0x00, 0x00}; int ok = 1; for (int k = 0; k < 9; k++) if (p[k] != e[k]) ok = 0;
         if (ok) { p[0] = 0xE9; *(u32 *)(p + 1) = (u32)sprint_stub - (0x12CA48 + 5); for (int k = 5; k < 9; k++) p[k] = 0x90; out("Sprint (Left Shift): on\r\n"); } }

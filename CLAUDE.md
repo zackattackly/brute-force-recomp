@@ -115,6 +115,12 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   Deploy the worker: `npx wrangler@4 deploy` in dist\matchlist. relay_log.txt = helper connects/disconnects.
   Original (unpatched) default.xbe: the start-up disc authentication is skipped in memory (jge -> jmp at 0x2F8257).
   The in-game widescreen widening is off by default (wide.txt): it made the view pull back further after each sprint.
+- Milestone 101 (hit marker): hitmarker.wav (from the user's clip) plays when the player's shot hits a character. Hook on the
+  bullet ray call 0x2309ED (0x230040, stdcall 6 args; result arg4: +0x34 = SHOOTER, +0x44 = object hit; a character when
+  [[obj+0xC]+4] == 3; alive when health, a float at character +0x54, is above 0) and on the pass-through path 0x2309CB
+  (0x230400). The red X (hitmarker_img.raw, 96x96 RGBA) is drawn by bfgl.c present_tex from RING pad[56] (pad is now 64
+  words). nohitsound.txt / nohitmark.txt = off. Game objects live at
+  0x80000000+: never range-test game pointers with < 0x7FFE0000 (that hid every hit).
 - Next: weapon poses (bone level), camera collision, START icon in HUD text draws black.
 - Semaphore releases (0x1D70) are now written to D3D's fence word, replacing the GET==PUT fence shortcut.
 - Test aids: `bench.txt` (renderer benchmark at start), `rbench.bat` (standalone), the `[profile]` log lines

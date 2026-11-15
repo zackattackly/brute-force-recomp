@@ -1294,7 +1294,26 @@ static void present_tex(GLuint tex, u32 w, u32 h) {
     static f32 sharp = -1; static u32 tsh; if (sharp < 0 || now - tsh > 1000) { tsh = now; sharp = 0.6f; HANDLE fh = CreateFileA("sharpen.txt", 0x80000000, 1, 0, 3, 0x80, 0);   /* sharpen.txt: strength in percent (0 = off) */
         if (fh != (HANDLE)-1) { char sb[8] = {0}; DWORD nr = 0; ReadFile(fh, sb, 7, &nr, 0); CloseHandle(fh); u32 sv = 0; int any = 0; for (DWORD k = 0; k < nr; k++) if (sb[k] >= 0x30 && sb[k] <= 0x39) { sv = sv * 10 + sb[k] - 0x30; any = 1; } if (any) sharp = sv / 100.0f; } }
     glUniform1i(g_p_tex, 0); glUniform4f(g_p_rcp, 1.0f / w, 1.0f / h, (noaa || g_present_movie) ? 1.0f : 0.0f, g_present_movie ? sharp * 0.5f : sharp);   /* movies: no FXAA (it softened them), light sharpening */
-    glBindVertexArray(g_pvao); glDrawArrays(4, 0, 3); glBindVertexArray(g_vao); g_curp = 0; }
+    glBindVertexArray(g_pvao); glDrawArrays(4, 0, 3); glBindVertexArray(g_vao); g_curp = 0;
+    if (!g_present_movie) {   /* Milestone 101: the hit marker - hitmarker_img.raw (96x96 RGBA) over the reticle for 250 ms after a hit (pad[56]) */
+        static GLuint hp, ht; static GLint h_r, h_a, h_t; static u32 hstate;
+        u32 hit = g_r->pad[56]; s32 age = (s32)(now - hit);
+        if (hit && age >= 0 && age < 250) {
+            if (!hstate) { hstate = 2; HANDLE fh = CreateFileA("hitmarker_img.raw", 0x80000000, 1, 0, 3, 0x80, 0);
+                if (fh != (HANDLE)-1) { static u8 img[96 * 96 * 4]; DWORD nr = 0; ReadFile(fh, img, sizeof img, &nr, 0); CloseHandle(fh);
+                    GLuint vs = compile(0x8B31, "#version 130\nuniform vec4 r; out vec2 uv;\nvoid main() { vec2 q = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1)); uv = vec2(q.x, 1.0 - q.y); gl_Position = vec4(mix(r.xy, r.zw, q), 0.0, 1.0); }\n");
+                    GLuint fs = compile(0x8B30, "#version 130\nuniform sampler2D t; uniform vec4 a; in vec2 uv; out vec4 o;\nvoid main() { vec4 c = texture(t, uv); o = vec4(c.rgb, c.a * a.x); }\n");
+                    if (nr == sizeof img && vs && fs) { hp = glCreateProgram(); glAttachShader(hp, vs); glAttachShader(hp, fs); glBindFragDataLocation(hp, 0, "o"); glLinkProgram(hp);
+                        h_r = glGetUniformLocation(hp, "r"); h_a = glGetUniformLocation(hp, "a"); h_t = glGetUniformLocation(hp, "t");
+                        glGenTextures(1, &ht); glBindTexture(0x0DE1, ht); glTexImage2D(0x0DE1, 0, 0x8058, 96, 96, 0, 0x1908 /* RGBA */, 0x1401, img);
+                        glTexParameteri(0x0DE1, 0x2800, 0x2601); glTexParameteri(0x0DE1, 0x2801, 0x2601); glTexParameteri(0x0DE1, 0x2802, 0x812F); glTexParameteri(0x0DE1, 0x2803, 0x812F); hstate = 1; } } }
+            if (hstate == 1) {   /* centred on the reticle (320, 192 of the 640x480 frame), square on screen, 18 frame pixels (user: smaller than 44, then than 28); fades out */
+                f32 px = dx + dw * 0.5f, py = dy + dh * (1.0f - 192.0f / 480.0f), half = 9.0f * dh / 480.0f * (1.0f + 0.15f * (1.0f - age / 250.0f));
+                f32 a = age < 120 ? 1.0f : 1.0f - (age - 120) / 130.0f;
+                glViewport(0, 0, cw, ch); glUseProgram(hp); glEnable(0x0BE2); glBlendFunc(0x0302, 0x0303);   /* SRC_ALPHA, ONE_MINUS_SRC_ALPHA */
+                glActiveTexture(0x84C0); glBindTexture(0x0DE1, ht); glUniform1i(h_t, 0); glUniform4f(h_a, a, 0, 0, 0);
+                glUniform4f(h_r, (px - half) / cw * 2.0f - 1.0f, (py - half) / ch * 2.0f - 1.0f, (px + half) / cw * 2.0f - 1.0f, (py + half) / ch * 2.0f - 1.0f);
+                glBindVertexArray(g_pvao); glDrawArrays(5 /* TRIANGLE_STRIP */, 0, 4); glBindVertexArray(g_vao); glDisable(0x0BE2); g_curp = 0; } } } }
 static void present_memory(u32 addr) {
     u32 pitch = K(0x20C) & 0xFFFF; if (!pitch) pitch = 2560; u32 w = 640, h = 480;
     if ((addr & 0x03FFFFFF) + pitch * h > 0x4000000) return;
