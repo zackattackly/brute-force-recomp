@@ -113,6 +113,9 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   rooms (dist\matchlist, wss://brute-force-list...workers.dev/relay?room=R, a MAC-learning switch). On by default from
   server.txt; old "list" lines mean the relay; "offline" in netplay.txt turns it off; "password" = private room.
   Deploy the worker: `npx wrangler@4 deploy` in dist\matchlist. relay_log.txt = helper connects/disconnects.
+  On a friend's PC the WebSocket upgrade got no answer and the helper (no receive limit) hung forever: the handshake now has
+  10 s limits, each failure is logged with its step and Windows error, the session uses the system proxy (WinHttpOpen 4),
+  and a quiet connected room (receive timeout 12002) is not treated as lost.
   Original (unpatched) default.xbe: the start-up disc authentication is skipped in memory (jge -> jmp at 0x2F8257).
   The in-game widescreen widening is off by default (wide.txt): it made the view pull back further after each sprint.
 - Milestone 101 (hit marker): hitmarker.wav (from the user's clip) plays when the player's shot hits a character. Hook on the

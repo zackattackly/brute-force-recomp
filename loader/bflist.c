@@ -62,20 +62,31 @@ static void wl(void) { while (__sync_lock_test_and_set(&g_wlock, 1)) Sleep(0); }
 static void logl(const char *s) {   /* relay_log.txt next to the game: connects and disconnects only */
     HANDLE f = CreateFileA("relay_log.txt", 0x04 /* FILE_APPEND_DATA */, 1, 0, 4 /* OPEN_ALWAYS */, 0x80, 0); if (f == (HANDLE)-1) return;
     char b[160], *w = b; putn(&w, GetTickCount() / 1000); put(&w, " s: "); put(&w, s); put(&w, "\r\n"); DWORD n; WriteFile(f, b, (DWORD)(w - b), &n, 0); CloseHandle(f); }
+K32 DWORD WINAPI GetLastError(void);
+static char g_fail[96];   /* the step that failed and its Windows error, for the log */
+static void fail_at(const char *step) { char *w = g_fail; put(&w, "relay connect failed at "); put(&w, step); put(&w, ", error "); putn(&w, GetLastError()); *w = 0; }
 static void *ws_connect(void) {
+    /* every step has a time limit: on one PC the upgrade request was sent and no answer ever came (something between the
+       PC and Cloudflare held it); with no receive limit the helper waited forever and never tried again */
     char q[192], *w = q; put(&w, g_path); put(&w, "/relay?room="); putn(&w, g_room); *w = 0;
     u16 wh[128], wp[256]; static const u16 GET[] = {'G','E','T',0}; wide(wh, g_host, 128); wide(wp, q, 256);
-    void *c = w_connect(g_ses, wh, 443, 0); if (!c) return 0;
-    void *r = w_request(c, GET, wp, 0, 0, 0, 0x00800000 /* SECURE */); if (!r) { w_close(c); return 0; }
+    void *c = w_connect(g_ses, wh, 443, 0); if (!c) { fail_at("connect"); return 0; }
+    void *r = w_request(c, GET, wp, 0, 0, 0, 0x00800000 /* SECURE */); if (!r) { fail_at("open request"); w_close(c); return 0; }
+    if (w_timeouts) w_timeouts(r, 8000, 8000, 8000, 10000);   /* resolve, connect, send, receive: the answer within 10 s */
     void *ws = 0;
-    if (w_option(r, 114 /* WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET */, 0, 0) && w_send(r, 0, 0, 0, 0, 0, 0) && w_receive(r, 0)) ws = w_upgrade(r, 0);
+    if (!w_option(r, 114 /* WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET */, 0, 0)) fail_at("upgrade option");
+    else if (!w_send(r, 0, 0, 0, 0, 0, 0)) fail_at("send");
+    else if (!w_receive(r, 0)) fail_at("receive (no answer from the server)");
+    else if (!(ws = w_upgrade(r, 0))) fail_at("upgrade (the answer was not a WebSocket)");
     w_close(r); if (!ws) w_close(c);   /* (the connection handle stays open while the WebSocket lives) */
+    else { u32 inf = 0; w_option(ws, 6 /* WINHTTP_OPTION_RECEIVE_TIMEOUT */, &inf, 4); }   /* connected: wait for frames as long as it takes */
     return ws; }
 static u32 WINAPI rx_thread(void *unused) {   /* relay -> loader */
     (void)unused; static u8 b[2048];
     for (;;) {
         void *ws = (void *)g_ws; if (!ws) { Sleep(50); continue; }
         u32 n = 0, type = 0; u32 e = w_wrecv(ws, b + 8, sizeof b - 8, &n, &type);
+        if (e == 12002 /* ERROR_WINHTTP_TIMEOUT: a quiet room, not a lost connection */) continue;
         if (e || type == 4 /* close */) { wl(); if (g_ws == ws) { g_ws = 0; w_close(ws); logl("relay connection lost"); } wu(); continue; }
         if (type == 0 /* a whole binary message */ && n >= 14) { *(u32 *)b = 0x324E4642; *(u32 *)(b + 4) = g_room; p_sendto(g_sock, b, (int)n + 8, 0, &g_loader, sizeof g_loader); g_rx++; } }
     return 0; }
@@ -94,7 +105,7 @@ static void relay_main(HANDLE parent, u32 room, u32 port) {
         if (now - heard > 20000) break;                             /* no word from the loader for 20 s */
         if (!g_ws && (int)(now - tryat) >= 0) { void *ws = ws_connect();
             if (ws) { wl(); g_ws = ws; wu(); fails = 0; logl("relay connected"); }
-            else { fails++; tryat = now + (fails < 5 ? 1000 : 5000); if (fails == 1 || fails % 12 == 0) logl("relay connect failed (retrying)"); } }
+            else { fails++; tryat = now + (fails < 5 ? 1000 : 5000); if (fails <= 3 || fails % 12 == 0) logl(g_fail[0] ? g_fail : "relay connect failed (retrying)"); } }
         struct { u32 n; u32 s[1]; } rd = {1, {s}}; s32 tv[2] = {0, 50000};
         if (p_select(0, &rd, 0, 0, tv) > 0) for (int k = 0; k < 64; k++) {
             SIN f; int fl = sizeof f; int n = p_recvfrom(s, b, sizeof b, 0, &f, &fl);
@@ -126,7 +137,7 @@ void WINAPI start(void) {
         if (!w_upgrade || !w_wsend || !w_wrecv || !p_select) ExitProcess(5);   /* (WebSockets in WinHTTP: Windows 8 and later) */
         static u8 wsa[512]; p_WSAStartup(0x0202, wsa);
         static const u16 agent[] = {'B','r','u','t','e','F','o','r','c','e','R','e','c','o','m','p',0};
-        g_ses = w_open(agent, 0, 0, 0, 0); if (!g_ses) ExitProcess(4); if (w_timeouts) w_timeouts(g_ses, 8000, 8000, 8000, 0);   /* no receive timeout: the WebSocket waits */
+        g_ses = w_open(agent, 4 /* AUTOMATIC_PROXY: the system's own proxy settings, like a browser (Windows 8.1+) */, 0, 0, 0); if (!g_ses) g_ses = w_open(agent, 0, 0, 0, 0); if (!g_ses) ExitProcess(4); if (w_timeouts) w_timeouts(g_ses, 8000, 8000, 8000, 10000);   /* (each request sets its own; a connected WebSocket waits without a limit) */
         relay_main(parent, room, port); }
     { u32 k = 0; for (; a[0][k] && k < 127; k++) g_host[k] = a[0][k]; g_host[k] = 0; k = 0; if (a[1][0] != '-') for (; a[1][k] && k < 127; k++) g_path[k] = a[1][k]; g_path[k] = 0; }
     const char *p; p = a[2]; u32 room = num(&p); p = a[3]; u32 port = num(&p); p = a[4]; u32 myip = ip4(&p); p = a[5]; u32 pid = num(&p);
