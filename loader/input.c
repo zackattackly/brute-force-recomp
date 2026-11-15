@@ -1822,6 +1822,11 @@ void input_patch(void) {
         u32 n = hook6(0x11E570, move_stub, e1) + hook6(0xC4E70, lock_stub1, e2) + hook6(0xC4EC0, lock_stub2, e2) + hook6(0x13389D, friction_stub, e3);
         out("Aim assist off while the mouse aims: "); dec(n); out(" of 4 hooks\r\n"); }
 essential:
+    {   /* Milestone 99: XAPI's start-up disc authentication (0x2F801F: SCSI mode sense + security sectors through IOCTL 0x4D014).
+           Our DVD drive cannot answer it; an original default.xbe then reboots to the dashboard (HalReturnToFirmware(2), so
+           play.bat restarted it endlessly). Media-patched copies already jump past the result: do the same (jge -> jmp). */
+        u8 *p = (u8 *)0x2F8257; if (p[0] == 0x7D && p[1] == 0x06) { p[0] = 0xEB; out("Disc authentication: skipped (original default.xbe)\r\n"); }
+        else if (p[0] == 0xEB && p[1] == 0x06) out("Disc authentication: already skipped by this default.xbe\r\n"); }
     {   u8 *p = (u8 *)0x37834E; if (p[0] == 0x8B && p[1] == 0x08 && p[2] == 0x56) { p[0] = 0xE9; *(u32 *)(p + 1) = (u32)gamma_stub - (0x37834E + 5); out("Gamma ramp: captured\r\n"); } }
     {   u32 n = jmp_to(0x2F2986, QueryPerformanceCounter_, 0x8B) + jmp_to(0x377780, rdtsc_, 0x0F);
         out("Clock functions patched: "); dec(n); out(" of 2 (733 MHz time-stamp counter)\r\n"); }
