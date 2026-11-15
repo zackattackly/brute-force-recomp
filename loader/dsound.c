@@ -286,7 +286,7 @@ void snd_razor_reload(void) { razor_snd_load(); if (!g_rz_snd) return; g_rz_mute
 static s32 NTAPI B_Play(void *b, u32 r1, u32 r2, u32 flags) { TR("B_Play"); VOICE *v = vo(b);
     if (v && v->fmt.tag == 0x69 && !(flags & 1)) { razor_snd_load();
         if (g_rz_snd && ((v->rstart == 0xBC8B0 && v->rlen == 0x1A28) || (v->rstart == 0x82848 && v->rlen == 0x1680) || (v->rstart == 0xFDE60 && v->rlen == 0x15F0))) { razor_play(g_rz_shot, g_rz_shotn, v); v->playing = 0; v->pos = 0; return 0; }
-        if (g_rz_snd && (s32)(g_rz_mute - GetTickCount()) > 0 && ((v->rstart == 0x12FC0 && v->rlen == 0xF0C) || (v->rstart == 0x83F10 && v->rlen == 0x1680))) { v->playing = 0; v->pos = 0; return 0; } }
+        if (g_rz_snd && g_rz_mute && (s32)(g_rz_mute - GetTickCount()) > 0 && ((v->rstart == 0x12FC0 && v->rlen == 0xF0C) || (v->rstart == 0x83F10 && v->rlen == 0x1680))) { v->playing = 0; v->pos = 0; return 0; } }
     if (v) { PLAYREC *r = &g_pr[g_prn++ % 64]; r->t = GetTickCount(); r->data = (u32)v->data; r->rstart = v->rstart; r->rlen = v->rlen; r->bytes = v->bytes; r->rate = v->fmt.rate; r->ch = v->fmt.ch; r->tag = v->fmt.tag; r->bits = v->fmt.bits; r->ra = (u32)__builtin_return_address(0); r->vi = (u32)(v - g_v); }
     if (v) { v->nplay++; if (!v->playing) v->pos = 0; v->looping = flags & 1; v->paused = 0; v->playing = 1; g_snd_plays++; } return 0; }
 static s32 NTAPI B_Stop(void *b) { TR("B_Stop"); VOICE *v = vo(b); if (v) { v->playing = 0; v->pos = 0; } return 0; }

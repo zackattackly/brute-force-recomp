@@ -1,4 +1,4 @@
-/* bflist.exe - the match-list helper (Milestone 98b), started by the loader when netplay.txt has "list <url>".
+﻿/* bflist.exe - the match-list helper (Milestone 98b), started by the loader when netplay.txt has "list <url>".
  *
  * WinHTTP cannot run inside the loader (it reads the program's own header, where the game's Xbox header sits), so this small
  * normal process talks to the match list (a Cloudflare Worker) and to the loader over UDP on this PC:
@@ -109,8 +109,8 @@ static void relay_main(HANDLE parent, u32 room, u32 port) {
     { u32 one = 1; p_ioctlsocket(s, 0x8004667E /* FIONBIO */, &one); }   /* non-blocking: the loop below drains, then waits in select */
     g_sock = s; SIN ld = {2, bswap16((u16)port), 0x0100007F}; g_loader = ld;
     u32 tid; CreateThread(0, 0, rx_thread, 0, 0, &tid); CreateThread(0, 0, watchdog, 0, 0, &tid);
-    static u8 b[2048]; u32 heard = GetTickCount(), tryat = 0, ka = 0, fails = 0;
-    logl("relay helper started (version 2026-11-15b)");
+    static u8 b[2048]; u32 heard = GetTickCount(), tryat = heard, ka = 0, fails = 0;   /* (tryat = now, not 0: (int)(now - 0) is negative once a PC has been on for 24.8 days - it never tried to connect) */
+    logl("relay helper started (version 2026-11-15c)");
     for (;;) {
         if (parent && WaitForSingleObject(parent, 0) == 0) break;   /* the game ended */
         u32 now = GetTickCount();

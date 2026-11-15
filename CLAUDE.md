@@ -119,6 +119,9 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   ("relay helper started (version ...)"), a watchdog logs a step still waiting after 15 s / 60 s, a busy port is logged.
   The installer closes bflist/bfview/bfserver running from the install folder before copying (an old hung helper kept
   bflist.exe locked, so updates silently failed) and stops with a message if a file can't be replaced.
+  THE real cause on the friend's PC: 41 days of uptime. GetTickCount above 2^31 (24.8 days) makes (int)(now - 0) negative;
+  the helper's "time to connect" (tryat = 0) was never true. Never compare ticks signed against a value that may be 0: start
+  timers at GetTickCount() or test for 0 first (fixed in bflist.c, net.c is_hosting, dsound.c g_rz_mute).
   Original (unpatched) default.xbe: the start-up disc authentication is skipped in memory (jge -> jmp at 0x2F8257).
   The in-game widescreen widening is off by default (wide.txt): it made the view pull back further after each sprint.
 - Milestone 101 (hit marker): hitmarker.wav (from the user's clip) plays when the player's shot hits a character. Hook on the

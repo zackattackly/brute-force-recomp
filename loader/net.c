@@ -186,7 +186,7 @@ static int peer_add(const SIN *a, int listed) {   /* lock held; returns the inde
 static void list_send(const SIN *to, const u8 *frame, u32 len) {
     static u8 b[1600]; if (len > 1560) return; *(u32 *)b = MAGIC3; *(u32 *)(b + 4) = g_room; if (len) memcpy_(b + 8, frame, len);
     p_sendto(g_sock, b, (int)len + 8, 0, to, sizeof *to); }
-static int is_hosting(void) { return g_force_host || (int)(g_host_until - GetTickCount()) > 0; }
+static int is_hosting(void) { return g_force_host || (g_host_until && (int)(g_host_until - GetTickCount()) > 0); }   /* (0 = never: after 24.8 days of uptime (int)(0 - now) is positive) */
 static void ip_out(u32 a) { for (int q = 0; q < 4; q++) { dec((a >> (q * 8)) & 255); if (q < 3) out("."); } }
 
 static void num_out(char **q, u32 v) { char d[12]; int z = 0; do d[z++] = (char)('0' + v % 10); while (v /= 10); while (z) *(*q)++ = d[--z]; }
