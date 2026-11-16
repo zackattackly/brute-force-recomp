@@ -134,6 +134,10 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   room objects keep their code until everyone disconnects - ROOM_PREFIX in worker.js gives fresh rooms).
   Original (unpatched) default.xbe: the start-up disc authentication is skipped in memory (jge -> jmp at 0x2F8257).
   The in-game widescreen widening is off by default (wide.txt): it made the view pull back further after each sprint.
+- Milestone 106 (online joining, untested with 2 PCs): nothing answered the consoles' DHCP, so they had no IP and the match
+  reply carried address 0.0.0.0 (the joiner ignored it). net.c local_answer answers DHCP (10.<MAC bytes 3-5>, mask 255.0.0.0,
+  server/gateway 10.0.0.1 = MAC 02:42:46:00:00:01, ARP for it answered too) on the PC itself; noaddr.txt = off. Verified: the host's
+  reply now carries its 10.x address (a stand-in joiner replaying a real search over a .NET WebSocket into room 0).
 - Milestone 101 (hit marker): hitmarker.wav (from the user's clip) plays when the player's shot hits a character. Hook on the
   bullet ray call 0x2309ED (0x230040, stdcall 6 args; result arg4: +0x34 = SHOOTER, +0x44 = object hit; a character when
   [[obj+0xC]+4] == 3; alive when health, a float at character +0x54, is above 0) and on the pass-through path 0x2309CB

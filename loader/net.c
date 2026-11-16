@@ -57,9 +57,11 @@ static int is_digit(char c) { return c >= '0' && c <= '9'; }
 static u32 parse_num(const char **p) { u32 v = 0; while (is_digit(**p)) v = v * 10 + (u32)(*(*p)++ - '0'); return v; }
 static int hexv(char c) { return is_digit(c) ? c - '0' : (c >= 'a' && c <= 'f') ? c - 'a' + 10 : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1; }
 
+static int g_noaddr;   /* noaddr.txt: no built-in address server (A/B) */
 static void net_config(void) {
     if (g_on >= 0) return;
     g_on = 0;
+    { HANDLE f = CreateFileA("noaddr.txt", 0x80000000, 1, 0, 3, 0x80, 0); if (f != (HANDLE)-1) { CloseHandle(f); g_noaddr = 1; } }
     char t[512]; DWORD n = 0; t[0] = 0;
     {   HANDLE f = CreateFileA("netplay.txt", 0x80000000, 1, 0, 3, 0x80, 0);
         if (f != (HANDLE)-1) { ReadFile(f, t, sizeof t - 1, &n, 0); CloseHandle(f); } t[n] = 0; }
@@ -256,11 +258,61 @@ static u32 g_log_n;
 static void reg_log(const char *what, u32 off, u32 v) { if (g_log_n < 400) { g_log_n++; out("  [nic] "); out(what); out(" "); hex(off); out(" "); hex(v); out("\r\n"); } }
 
 static void deliver_local(const u8 *f, u32 len);
-static void frame_log(const char *what, const u8 *f, u32 len) {   /* the first bytes of a frame -> the log (the first few only) */
-    static u32 n; if (n >= 24) return; n++; static const char hx[] = "0123456789ABCDEF"; out("  [frame] "); out(what); out(" len "); dec(len); out(":");
-    for (u32 i = 0; i < len && i < 40; i++) { char b[4] = {' ', hx[f[i] >> 4], hx[f[i] & 15], 0}; out(b); } out("\r\n"); }
+static void rx_frame(const u8 *f, u32 len);
+static void frame_log(const char *what, const u8 *f, u32 len) {   /* the first bytes of a frame -> the log: the first 3 of each kind (direction, size, broadcast or not, UDP port) */
+    static u32 kinds[64], kn[64], nk; u32 key = (u32)what[0] * 131 + len * 7 + (len >= 14 ? (f[0] & 1) * 3 : 0) + (len >= 38 ? (u32)f[36] << 8 | f[37] : 0) * 1009, i = 0;
+    for (; i < nk && kinds[i] != key; i++) ; if (i == nk) { if (nk == 64) return; kinds[nk] = key; kn[nk++] = 0; } if (kn[i]++ >= 3) return;
+    static const char hx[] = "0123456789ABCDEF"; out("  [frame] "); out(what); out(" len "); dec(len); out(":");
+    for (u32 i = 0; i < len && i < 64; i++) { char b[4] = {' ', hx[f[i] >> 4], hx[f[i] & 15], 0}; out(b); } out("\r\n"); }
+/* A built-in address server (the console's own requests never leave this PC). Without it the console never got an IP address:
+   its match reply carried address 0.0.0.0 and the joining console ignored it. Each console gets 10.<last 3 bytes of its MAC>,
+   mask 255.0.0.0, gateway / server 10.0.0.1 (a made-up machine whose ARP is answered here too). Lock held (called from tx). */
+static const u8 g_srv_mac[6] = {0x02, 0x42, 0x46, 0x00, 0x00, 0x01};
+static void ip_sum(u8 *ip) { u32 s = 0; ip[10] = ip[11] = 0; for (int i = 0; i < 20; i += 2) s += (u32)ip[i] << 8 | ip[i + 1]; while (s >> 16) s = (s & 0xFFFF) + (s >> 16); s = ~s & 0xFFFF; ip[10] = (u8)(s >> 8); ip[11] = (u8)s; }
+static int local_answer(const u8 *f, u32 len) {   /* 1 = handled here (not sent to the other players) */
+    static u8 r[600]; u32 i;
+    if (len >= 42 && f[12] == 0x08 && f[13] == 0x06) {   /* ARP */
+        if (f[21] != 1) return 0;                        /* only requests */
+        if (!(f[38] == 10 && f[39] == 0 && f[40] == 0 && f[41] == 1)) return 0;   /* for anyone but our server: the room answers */
+        for (i = 0; i < 60; i++) r[i] = 0;
+        for (i = 0; i < 6; i++) { r[i] = f[6 + i]; r[6 + i] = g_srv_mac[i]; } r[12] = 8; r[13] = 6;
+        r[14] = 0; r[15] = 1; r[16] = 8; r[17] = 0; r[18] = 6; r[19] = 4; r[20] = 0; r[21] = 2;
+        for (i = 0; i < 6; i++) { r[22 + i] = g_srv_mac[i]; r[32 + i] = f[22 + i]; } r[28] = 10; r[29] = 0; r[30] = 0; r[31] = 1;
+        for (i = 0; i < 4; i++) r[38 + i] = f[28 + i];
+        frame_log("arp answer", r, 60); rx_frame(r, 60); return 1; }
+    if (len < 42 || f[12] != 8 || f[13] != 0 || f[23] != 17) return 0;
+    u32 ih = (f[14] & 15) * 4; const u8 *u = f + 14 + ih;
+    if (14 + ih + 8 + 240 > len || u[0] != 0 || u[1] != 68 || u[2] != 0 || u[3] != 67) return 0;   /* DHCP client -> server */
+    const u8 *b = u + 8; u32 blen = len - (14 + ih + 8);
+    if (b[0] != 1 || b[236] != 99 || b[237] != 130 || b[238] != 83 || b[239] != 99) return 1;
+    u32 type = 0; for (u32 o = 240; o + 1 < blen && b[o] != 255; ) { if (b[o] == 0) { o++; continue; } if (b[o] == 53 && o + 2 < blen) type = b[o + 2]; o += 2 + b[o + 1]; }
+    if (type != 1 && type != 3) return 1;              /* discover -> offer, request -> ack; others (release...) need no answer */
+    u8 me[4] = {10, b[31], b[32], b[33]}; if (me[3] == 0) me[3] = 1; if (me[3] == 255) me[3] = 254;
+    for (i = 0; i < sizeof r; i++) r[i] = 0;
+    for (i = 0; i < 6; i++) { r[i] = 0xFF; r[6 + i] = g_srv_mac[i]; } r[12] = 8; r[13] = 0;
+    u8 *ip = r + 14, *ud = ip + 20, *p = ud + 8;
+    p[0] = 2; p[1] = 1; p[2] = 6; for (i = 0; i < 4; i++) p[4 + i] = b[4 + i]; p[10] = b[10]; p[11] = b[11];
+    for (i = 0; i < 4; i++) { p[16 + i] = me[i]; } p[20] = 10; p[23] = 1; for (i = 0; i < 16; i++) p[28 + i] = b[28 + i];
+    p[236] = 99; p[237] = 130; p[238] = 83; p[239] = 99;
+    u8 *o = p + 240;
+    *o++ = 53; *o++ = 1; *o++ = (u8)(type == 1 ? 2 : 5);
+    *o++ = 54; *o++ = 4; *o++ = 10; *o++ = 0; *o++ = 0; *o++ = 1;
+    *o++ = 51; *o++ = 4; *o++ = 0x00; *o++ = 0x76; *o++ = 0xA7; *o++ = 0x00;   /* lease: 90 days */
+    *o++ = 1; *o++ = 4; *o++ = 255; *o++ = 0; *o++ = 0; *o++ = 0;
+    *o++ = 3; *o++ = 4; *o++ = 10; *o++ = 0; *o++ = 0; *o++ = 1;
+    *o++ = 6; *o++ = 4; *o++ = 10; *o++ = 0; *o++ = 0; *o++ = 1;
+    *o++ = 255;
+    u32 plen = (u32)(o - p); if (plen < 300) plen = 300;
+    u32 ulen = 8 + plen, tot = 20 + ulen;
+    ip[0] = 0x45; ip[2] = (u8)(tot >> 8); ip[3] = (u8)tot; ip[8] = 64; ip[9] = 17;
+    ip[12] = 10; ip[13] = 0; ip[14] = 0; ip[15] = 1; ip[16] = ip[17] = ip[18] = ip[19] = 255; ip_sum(ip);
+    ud[1] = 67; ud[3] = 68; ud[4] = (u8)(ulen >> 8); ud[5] = (u8)ulen;   /* UDP checksum 0 = none */
+    static u32 said; if (said < 4) { said++; out(type == 1 ? "  [net] address offered: 10." : "  [net] address given: 10."); dec(me[1]); out("."); dec(me[2]); out("."); dec(me[3]); out("\r\n"); }
+    rx_frame(r, 14 + tot); return 1;
+}
 static void tx_frame(const u8 *f, u32 len) {
     g_tx_frames++; frame_log("sent", f, len);
+    if (!g_noaddr && local_answer(f, len)) return;
     if (!net_open()) return;
     if (g_list) {
         if (len >= 14 && !(f[0] & 1)) {   /* a frame to one console that searched lately: we answered a search, so we host */
@@ -301,7 +353,7 @@ static void deliver_local(const u8 *f, u32 len) {
     if (f[0] & 1) { u32 i = g_bci++ & 7; for (int k = 0; k < 6; k++) g_bc[i].m[k] = f[6 + k]; g_bc[i].t = GetTickCount() | 1; }   /* someone broadcast (a search) */
     int mine = (f[0] & 1); if (!mine) { mine = 1; for (int k = 0; k < 6; k++) if (f[k] != g_mac[k]) mine = 0; }   /* broadcast / multicast, or to this console */
     if (!mine) { frame_log("dropped (not to this console)", f, len); return; }
-    lock(); rx_frame(f, len); unlock();
+    frame_log("received", f, len); lock(); rx_frame(f, len); unlock();
 }
 
 u32 nic_rd(u32 off) {
