@@ -98,12 +98,26 @@ static long emulate_privileged(u32 *c) {
     c[0xB8/4] += len; return -1;   /* EXCEPTION_CONTINUE_EXECUTION */
 }
 
+/* Milestone 106 test aid: bptrace.txt + bp_list.bin (game addresses) = one-shot breakpoints; the first time each address runs,
+   "[bp] address" goes to the log (which code a System Link reply reaches). */
+static u32 *g_bp_a, g_bp_n; static u8 *g_bp_b;
+static int bp_find(u32 a) { u32 lo = 0, hi = g_bp_n; while (lo < hi) { u32 m = (lo + hi) / 2; if (g_bp_a[m] < a) lo = m + 1; else hi = m; } return (lo < g_bp_n && g_bp_a[lo] == a) ? (int)lo : -1; }
+static void bptrace_setup(void) {
+    HANDLE f = CreateFileA("bptrace.txt", 0x80000000, 1, 0, 3, 0x80, 0); if (f == (HANDLE)-1) return; CloseHandle(f);
+    f = CreateFileA("bp_list.bin", 0x80000000, 1, 0, 3, 0x80, 0); if (f == (HANDLE)-1) return;
+    static u32 a[8192]; static u8 b[8192]; DWORD n = 0; ReadFile(f, a, sizeof a, &n, 0); CloseHandle(f);
+    g_bp_a = a; g_bp_b = b; g_bp_n = n / 4;
+    for (u32 i = 0; i < g_bp_n; i++) { u8 *p = (u8 *)a[i]; DWORD old; VirtualProtect(p, 1, 0x40, &old); b[i] = *p; *p = 0xCC; }
+    out("  [bp] breakpoints set: "); dec(g_bp_n); out("\r\n");
+}
 /* sees every exception first: logs it (the game may handle it itself) and catches stack overflows,
    which never reach the normal crash report */
 u32 g_exc_av, g_exc_step, g_exc_priv, g_exc_other;   /* exception counts, for the status line */
 static long __stdcall first_chance(u32 **ep) {
     static u32 n; u32 *rec = ep[0];
     if (rec[0] == 0xC0000005) g_exc_av++; else if (rec[0] == 0x80000004) g_exc_step++; else if (rec[0] == 0xC0000096) g_exc_priv++; else g_exc_other++;
+    if (rec[0] == 0x80000003 && g_bp_n) { int i = bp_find(rec[3]); if (i >= 0) { *(u8 *)rec[3] = g_bp_b[i]; ep[1][0xB8 / 4] = rec[3];
+        out("  [bp] "); hex(rec[3]); out(" t"); dec(GetTickCount() % 1000000); out("\r\n"); return -1; } }
     if (rec[0] == 0xC00000FD) { out("\r\nSTACK OVERFLOW at "); hex(rec[3]); out("\r\n"); return crash(ep); }
     if (rec[0] == 0x406D1388 || rec[0] == 0x40010006) return 0;   /* debugger notifications */
     if (rec[0] == 0xC0000096) { long r = emulate_privileged(ep[1]); if (r) return r; }
@@ -195,6 +209,7 @@ __declspec(dllexport) void __cdecl BfMain(const char *unused) {
     out("fs: reads patched: "); dec(patch_fs(code + 0x8000)); out(" of 25\r\n");
     { void input_patch(void); input_patch(); }
     { void dsound_patch(void); dsound_patch(); }
+    bptrace_setup();
     { void render_bench(void); render_bench(); }   /* with bench.txt: renderer speed before the game runs */
 
     /* TLS: index variable = 0; the main thread gets a block of the template's size */

@@ -78,3 +78,6 @@ CreateToolhelp32Snapshot@8
 Thread32First@8
 Thread32Next@8
 CopyFileA@12
+GetCurrentProcess@0
+GetProcessTimes@20
+GetSystemTimes@12

@@ -124,6 +124,7 @@ static s32 WINAPI wndproc(void *h, u32 m, u32 wp, u32 lp) {
     if (m == 0x0008) mouse_release();                                       /* WM_KILLFOCUS */
     if ((m == 0x0104 || m == 0x0100) && wp == 0x79) { mouse_release(); g_userfree = 1; return 0; }   /* F10 (a system key: no menu): free until the next click */
     if ((m == 0x0100 && wp == 0x7A) || (m == 0x0104 && wp == 0x0D && (lp & (1u << 29)))) { if (!(lp & (1u << 30))) set_full(!g_full); return 0; }   /* F11 / Alt+Enter: full screen on or off */
+    if (m == 0x0100 && wp == 0x72 && !(lp & (1u << 30))) { extern volatile int g_perf_toggle; g_perf_toggle = 1; return 0; }   /* F3: the performance panel (bfgl.c) */
     if (m == 0x0100 && wp == 0x7B) { extern volatile int g_shot_req; g_shot_req = 1; return 0; }   /* F12: screenshot (bfgl.c) */
     return DefWindowProcA(h, m, wp, lp);
 }

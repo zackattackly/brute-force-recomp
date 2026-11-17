@@ -18,3 +18,4 @@ TextOutA@20
 TextOutW@20
 GetTextExtentPoint32W@16
 CreateBitmap@20
+GdiFlush@0

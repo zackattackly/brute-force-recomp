@@ -1392,6 +1392,101 @@ static GLuint g_memtex, g_memfbo;
    (a widescreen window used to stretch it), and FXAA smooths the jagged edges (the game has no anti-aliasing at 640x480).
    stretch.txt = fill the window as before; noaa.txt = no FXAA (both read every second). */
 static GLuint g_pprog, g_pvao; static GLint g_p_tex, g_p_rcp; static u32 g_present_movie;
+/* ---- the performance panel (F3; perf.txt = shown from the start) ----
+   Once a second: the viewer's own numbers (screen frames, frame times, draw calls, its busy time, the command backlog, sound
+   gaps) and the loader's (RING pad[84..93], gpu.c perf_sample: game frames, CPU, network) are drawn as text with GDI into a
+   small picture, which present_tex lays over the top-left corner. While shown, each second is also a line of perf_log.csv. */
+IMP BOOL WINAPI GdiFlush(void);
+typedef struct { u32 size; s32 w, h; u16 planes, bpp; u32 compr, img, xppm, yppm, used, important; } PF_BMIH;
+volatile int g_perf_toggle; static int g_perf_on = -1; static GLuint g_pf_tex, g_pf_prog; static GLint g_pf_r, g_pf_t; static u32 g_pf_w, g_pf_h;
+static long long g_pf_qf, g_pf_last, g_pf_t0; static u32 g_pf_n, g_pf_worst, g_pf_sum, g_pf_draws0, g_pf_busy0, g_pf_gap0, g_pf_seen;
+static HANDLE g_pf_csv = (HANDLE)-1;
+static char *pf_num(char *o, u32 v) { char d[12]; int i = 11; d[i] = 0; do { d[--i] = (char)('0' + v % 10); v /= 10; } while (v); for (; d[i]; i++) *o++ = d[i]; return o; }
+static char *pf_dec1(char *o, u32 v) { o = pf_num(o, v / 10); *o++ = '.'; *o++ = (char)('0' + v % 10); return o; }   /* tenths */
+static char *pf_str(char *o, const char *s) { while (*s) *o++ = *s++; return o; }
+static void perf_render(const u32 *v) {   /* v: the numbers of this second (see perf_present) */
+    enum { PW = 470, LH = 19, NL = 11 }; u32 PH = NL * LH + 10;
+    static void *dc, *bm, *font; static u32 *bits;
+    if (!dc) { dc = CreateCompatibleDC(0); PF_BMIH bi = {sizeof bi, PW, -(s32)PH, 1, 32, 0, 0, 0, 0, 0, 0}; bm = CreateDIBSection(dc, &bi, 0, (void **)&bits, 0, 0);
+        font = CreateFontA(-16, 0, 0, 0, 600, 0, 0, 0, 0, 0, 0, 4 /* ANTIALIASED_QUALITY */, 0x31, "Consolas"); SelectObject(dc, bm); SelectObject(dc, font); SetBkMode(dc, 1); }
+    if (!bits) return;
+    for (u32 i = 0; i < PW * PH; i++) bits[i] = 0;
+    const u32 W = 0xEEEEEE, G = 0x60E070, Y = 0x40D8F0, R = 0x5050FF, GR = 0xA0A0A0;   /* GDI colours are 0x00BBGGRR */
+    char t[96], *o; u32 y = 5, c;
+#define LINE(col) { SetTextColor(dc, col); TextOutA(dc, 8, y, t, (int)(o - t)); y += LH; }
+    o = pf_str(t, "PERFORMANCE   (F3 hides, log: perf_log.csv)"); LINE(GR)
+    c = v[0] >= 55 ? G : v[0] >= 30 ? Y : R;
+    o = pf_str(t, "Screen   "); o = pf_num(o, v[0]); o = pf_str(o, " fps   avg "); o = pf_dec1(o, v[1]); o = pf_str(o, " ms   worst "); o = pf_dec1(o, v[2]); o = pf_str(o, " ms"); LINE(c)
+    c = !v[4] ? GR : v[4] >= 55 ? G : v[4] >= 30 ? Y : R;
+    o = pf_str(t, "Game     "); o = pf_num(o, v[4]); o = pf_str(o, " frames/s   slowest "); o = pf_dec1(o, v[5]); o = pf_str(o, " ms"); LINE(c)
+    o = pf_str(t, "Drawing  "); o = pf_num(o, v[3]); o = pf_str(o, " draw calls/frame   viewer busy "); o = pf_num(o, v[8]); o = pf_str(o, "%"); LINE(v[8] > 85 ? Y : W)
+    o = pf_str(t, "Backlog  "); o = pf_num(o, v[9]); o = pf_str(o, " KB of drawing waiting"); LINE(v[9] > 4096 ? Y : W)
+    c = v[7] > 900 ? R : v[7] > 700 ? Y : W;
+    o = pf_str(t, "CPU      game "); o = pf_dec1(o, v[6]); o = pf_str(o, "%   whole PC "); o = pf_dec1(o, v[7]); o = pf_str(o, "%"); LINE(c)
+    o = pf_str(t, "Sound    "); o = pf_num(o, v[10]); o = pf_str(o, v[10] ? " ms of gaps this second" : " ms of gaps (smooth)"); LINE(v[10] ? R : G)
+    {   u32 st = v[11], pg = v[12];
+        if (st == 0) { o = pf_str(t, "Online   off"); LINE(GR) }
+        else if (st == 1) { o = pf_str(t, "Online   relay NOT connected"); LINE(R) }
+        else if (st == 2) { o = pf_str(t, "Online   relay connected   ping "); o = pf_num(o, pg); o = pf_str(o, " ms"); LINE(pg > 200 ? R : pg > 100 ? Y : G) }
+        else { o = pf_str(t, "Online   direct (host / join)"); LINE(W) } }
+    o = pf_str(t, "Network  sent "); o = pf_num(o, v[13]); o = pf_str(o, "/s   received "); o = pf_num(o, v[14]); o = pf_str(o, "/s   lost "); o = pf_num(o, v[15]); o = pf_str(o, "/s"); LINE(v[15] ? Y : W)
+    o = pf_str(t, v[16] ? "Game numbers live" : "Game numbers not arriving (loader busy?)"); LINE(v[16] ? GR : Y)
+#undef LINE
+    GdiFlush();
+    if (!g_pf_tex) { glGenTextures(1, &g_pf_tex); glBindTexture(0x0DE1, g_pf_tex); glTexParameteri(0x0DE1, 0x2800, 0x2601); glTexParameteri(0x0DE1, 0x2801, 0x2601); glTexParameteri(0x0DE1, 0x2802, 0x812F); glTexParameteri(0x0DE1, 0x2803, 0x812F); }
+    glBindTexture(0x0DE1, g_pf_tex); glTexImage2D(0x0DE1, 0, 0x8058, PW, PH, 0, 0x80E1 /* BGRA */, 0x1401, bits); g_pf_w = PW; g_pf_h = PH;
+}
+static void perf_csv(const u32 *v) {
+    if (g_pf_csv == (HANDLE)-1) { int fresh = GetFileAttributesA("perf_log.csv") == 0xFFFFFFFF;
+        g_pf_csv = CreateFileA("perf_log.csv", 0x4 /* FILE_APPEND_DATA */, 1, 0, 4 /* OPEN_ALWAYS */, 0x80, 0); if (g_pf_csv == (HANDLE)-1) return;
+        const char *h = fresh ? "seconds,screen_fps,avg_ms,worst_ms,game_fps,game_slowest_ms,draws_per_frame,game_cpu_pct,pc_cpu_pct,viewer_busy_pct,backlog_kb,sound_gap_ms,online,ping_ms,net_sent_s,net_received_s,net_lost_s\r\n" : "new session\r\n";
+        DWORD wr; u32 n = 0; while (h[n]) n++; WriteFile(g_pf_csv, h, n, &wr, 0); }
+    static const char *const ons[4] = {"off", "relay-down", "relay", "direct"};
+    char t[200], *o = t; long long now; QueryPerformanceCounter(&now);
+    o = pf_num(o, (u32)((now - g_pf_t0) / g_pf_qf)); *o++ = ',';
+    o = pf_num(o, v[0]); *o++ = ','; o = pf_dec1(o, v[1]); *o++ = ','; o = pf_dec1(o, v[2]); *o++ = ',';
+    o = pf_num(o, v[4]); *o++ = ','; o = pf_dec1(o, v[5]); *o++ = ','; o = pf_num(o, v[3]); *o++ = ',';
+    o = pf_dec1(o, v[6]); *o++ = ','; o = pf_dec1(o, v[7]); *o++ = ','; o = pf_num(o, v[8]); *o++ = ','; o = pf_num(o, v[9]); *o++ = ',';
+    o = pf_num(o, v[10]); *o++ = ','; o = pf_str(o, ons[v[11] & 3]); *o++ = ','; o = pf_num(o, v[12]); *o++ = ',';
+    o = pf_num(o, v[13]); *o++ = ','; o = pf_num(o, v[14]); *o++ = ','; o = pf_num(o, v[15]); *o++ = '\r'; *o++ = '\n';
+    DWORD wr; WriteFile(g_pf_csv, t, (DWORD)(o - t), &wr, 0); }
+static void perf_present(void) {   /* after each SwapBuffers */
+    long long t; if (!g_pf_qf) QueryPerformanceFrequency(&g_pf_qf); QueryPerformanceCounter(&t); if (!g_pf_t0) g_pf_t0 = t;
+    if (g_perf_on < 0) g_perf_on = GetFileAttributesA("perf.txt") != 0xFFFFFFFF;
+    if (g_perf_toggle) { g_perf_toggle = 0; g_perf_on = !g_perf_on; g_pf_seen = 0; }
+    if (g_pf_last) { u32 d = (u32)((t - g_pf_last) * 10000 / g_pf_qf); g_pf_sum += d; if (d > g_pf_worst) g_pf_worst = d; g_pf_n++; }   /* 0.1 ms */
+    g_pf_last = t;
+    static long long ts; if (!ts) { ts = t; g_pf_draws0 = g_r->draws; g_pf_busy0 = g_r->pad[2]; g_pf_gap0 = g_r->pad[10]; }
+    u32 ms = (u32)((t - ts) * 1000 / g_pf_qf); if (ms < 1000) return;
+    ts = t;
+    u32 v[17]; u32 n = g_pf_n ? g_pf_n : 1;
+    v[0] = (g_pf_n * 1000 + ms / 2) / ms; v[1] = g_pf_sum / n; v[2] = g_pf_worst;   /* tenths of a ms */
+    v[3] = (g_r->draws - g_pf_draws0) / n;
+    u32 *p = g_r->pad; static u32 lastupd, stale;
+    if (p[92] != lastupd) { lastupd = p[92]; stale = 0; } else stale++;
+    v[4] = p[84]; v[5] = p[85]; v[6] = p[86]; v[7] = p[87];
+    v[8] = (p[2] - g_pf_busy0) * 100 / ms; if (v[8] > 100) v[8] = 100;
+    v[9] = ((g_r->wpos - g_r->rpos) & (RING_WORDS - 1)) * 4 / 1024;
+    v[10] = (p[10] - g_pf_gap0) / 48;   /* silent frames at 48 kHz -> ms */
+    v[11] = p[90]; v[12] = p[91]; v[13] = p[88]; v[14] = p[89]; v[15] = p[93]; v[16] = stale < 3;
+    g_pf_n = 0; g_pf_sum = 0; g_pf_worst = 0; g_pf_draws0 = g_r->draws; g_pf_busy0 = p[2]; g_pf_gap0 = p[10];
+    if (g_perf_on) { perf_render(v); if (g_pf_seen++ > 0) perf_csv(v); }   /* (the first second after showing it is partial: not logged) */
+}
+static void perf_draw(s32 cw, s32 ch) {   /* the panel in the top-left corner (inside present_tex, default framebuffer bound) */
+    if (g_perf_on <= 0 || !g_pf_tex) return;
+    if (!g_pf_prog) {
+        GLuint vs = compile(0x8B31, "#version 130\nuniform vec4 r; out vec2 uv;\nvoid main() { vec2 q = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1)); uv = vec2(q.x, 1.0 - q.y); gl_Position = vec4(mix(r.xy, r.zw, q), 0.0, 1.0); }\n");
+        GLuint fs = compile(0x8B30, "#version 130\nuniform sampler2D t; in vec2 uv; out vec4 o;\nvoid main() { vec3 c = texture(t, uv).rgb; o = vec4(c, max(0.62, max(c.r, max(c.g, c.b)))); }\n");
+        if (!vs || !fs) { g_pf_prog = 0xFFFFFFFF; return; }
+        g_pf_prog = glCreateProgram(); glAttachShader(g_pf_prog, vs); glAttachShader(g_pf_prog, fs); glBindFragDataLocation(g_pf_prog, 0, "o"); glLinkProgram(g_pf_prog);
+        g_pf_r = glGetUniformLocation(g_pf_prog, "r"); g_pf_t = glGetUniformLocation(g_pf_prog, "t"); }
+    if (g_pf_prog == 0xFFFFFFFF) return;
+    f32 k = ch >= 1400 ? 2.0f : 1.0f, x0 = 12, y1 = ch - 12.0f, y0 = y1 - g_pf_h * k, x1 = x0 + g_pf_w * k;
+    glViewport(0, 0, cw, ch); glUseProgram(g_pf_prog); glEnable(0x0BE2); glBlendFunc(0x0302, 0x0303);
+    glActiveTexture(0x84C0); glBindTexture(0x0DE1, g_pf_tex); glUniform1i(g_pf_t, 0);
+    glUniform4f(g_pf_r, x0 / cw * 2.0f - 1.0f, y0 / ch * 2.0f - 1.0f, x1 / cw * 2.0f - 1.0f, y1 / ch * 2.0f - 1.0f);
+    glBindVertexArray(g_pvao); glDrawArrays(5, 0, 4); glBindVertexArray(g_vao); glDisable(0x0BE2); g_curp = 0; }
+
 static void present_tex(GLuint tex, u32 w, u32 h) {
     static u32 tl, stretch, noaa; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; stretch = GetFileAttributesA("pillarbox.txt") != 0xFFFFFFFF; noaa = GetFileAttributesA("noaa.txt") != 0xFFFFFFFF; }
     if (!g_pprog) {
@@ -1443,6 +1538,7 @@ static void present_tex(GLuint tex, u32 w, u32 h) {
         if (fh != (HANDLE)-1) { char sb[8] = {0}; DWORD nr = 0; ReadFile(fh, sb, 7, &nr, 0); CloseHandle(fh); u32 sv = 0; int any = 0; for (DWORD k = 0; k < nr; k++) if (sb[k] >= 0x30 && sb[k] <= 0x39) { sv = sv * 10 + sb[k] - 0x30; any = 1; } if (any) sharp = sv / 100.0f; } }
     glUniform1i(g_p_tex, 0); glUniform4f(g_p_rcp, 1.0f / w, 1.0f / h, (noaa || g_present_movie) ? 1.0f : 0.0f, g_present_movie ? sharp * 0.5f : sharp);   /* movies: no FXAA (it softened them), light sharpening */
     glBindVertexArray(g_pvao); glDrawArrays(4, 0, 3); glBindVertexArray(g_vao); g_curp = 0;
+    perf_draw(cw, ch);
     if (!g_present_movie) {   /* Milestone 101: the hit marker - hitmarker_img.raw (96x96 RGBA) over the reticle for 250 ms after a hit (pad[56]) */
         static GLuint hp, ht; static GLint h_r, h_a, h_t; static u32 hstate;
         u32 hit = g_r->pad[56]; s32 age = (s32)(now - hit);
@@ -1476,7 +1572,7 @@ static void present_memory(u32 addr) {
             if (np >= 600 * 4) { HANDLE fh = CreateFileA("present_log.txt", 0x40000000, 0, 0, 2, 0x80, 0); if (fh != (HANDLE)-1) { u32 wr; WriteFile(fh, pl, np, &wr, 0); CloseHandle(fh); } done = 1; } }
         lastsum = sum; lt = t; }
     glBindFramebuffer(0x8CA8, g_memfbo); g_present_movie = 1; present_tex(g_memtex, w, h); g_present_movie = 0;   /* Milestone 96: 4:3 kept, FXAA (the read framebuffer serves the fallback blit) */
-    SwapBuffers(g_dc); g_frame++; g_r->frames++; g_state_ok = 0; state_cache_reset();
+    SwapBuffers(g_dc); perf_present(); g_frame++; g_r->frames++; g_state_ok = 0; state_cache_reset();
     { static FB mf; mf.fbo = g_memfbo; mf.w = w; mf.h = h; if (g_shot_req) { { u32 v[2] = {g_shot_n + 1, g_frame}; dcol_line(v, 2, "SHOT"); } static char nm[24]; u32 k = ++g_shot_n, q = 0; const char *s = "shot"; while (*s) nm[q++] = *s++; char d[10]; int z = 0; do d[z++] = (char)(0x30 + k % 10); while (k /= 10); while (z) nm[q++] = d[--z]; s = ".bmp"; while (*s) nm[q++] = *s++; nm[q] = 0; g_save_name = nm; g_shot_req = 0; save_frame(&mf); g_save_name = "frame.bmp"; }
       u32 t = GetTickCount(); if (t - g_last_save > 5000) { g_last_save = t; save_frame(&mf); } }
 }
@@ -1575,7 +1671,7 @@ static void do_flip(u32 addr) {
                 for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) { glReadPixels((x * 2 + 1) * f->w * f->gs / 16, (y * 2 + 1) * f->h * f->gs / 16, 1, 1, 0x1908, 0x1401, px); sum += px[0] + px[1] + px[2]; }
                 lg[n++] = (u8)(sum / (64 * 3));
                 if (n == 800) { HANDLE fh = CreateFileA("luma_log.txt", 0x40000000, 0, 0, 2, 0x80, 0); if (fh != (HANDLE)-1) { char tx[800 * 4]; u32 q = 0; for (u32 k = 0; k < 800; k++) { u32 v = lg[k]; tx[q++] = (char)(0x30 + v / 100); tx[q++] = (char)(0x30 + v / 10 % 10); tx[q++] = (char)(0x30 + v % 10); tx[q++] = 0x20; } DWORD w; WriteFile(fh, tx, q, &w, 0); CloseHandle(fh); } } } } }
-    SwapBuffers(g_dc);
+    SwapBuffers(g_dc); perf_present();
     g_frame++; g_r->frames++; g_state_ok = 0; state_cache_reset();
     if (g_shot_req) { { u32 v[2] = {g_shot_n + 1, g_frame}; dcol_line(v, 2, "SHOT"); } static char nm[24]; u32 k = ++g_shot_n, q = 0; const char *s = "shot"; while (*s) nm[q++] = *s++; char d[10]; int z = 0; do d[z++] = (char)(0x30 + k % 10); while (k /= 10); while (z) nm[q++] = d[--z]; s = ".bmp"; while (*s) nm[q++] = *s++; nm[q] = 0; g_save_name = nm; g_shot_req = 0; save_frame(f); g_save_name = "frame.bmp"; }
     u32 t = GetTickCount(); if (t - g_last_save > 5000) { g_last_save = t; save_frame(f); }

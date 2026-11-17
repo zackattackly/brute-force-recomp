@@ -138,6 +138,10 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   reply carried address 0.0.0.0 (the joiner ignored it). net.c local_answer answers DHCP (10.<MAC bytes 3-5>, mask 255.0.0.0,
   server/gateway 10.0.0.1 = MAC 02:42:46:00:00:01, ARP for it answered too) on the PC itself; noaddr.txt = off. Verified: the host's
   reply now carries its 10.x address (a stand-in joiner replaying a real search over a .NET WebSocket into room 0).
+- Performance panel (F3 in the game window; perf.txt = shown at start): bfgl.c perf_present/perf_render/perf_draw (GDI text into a DIB,
+  drawn top-left in present_tex), log perf_log.csv (one line per second while shown). Loader numbers in RING pad[84..93] from gpu.c
+  perf_sample (game flips/s, slowest flip, CPU via GetProcessTimes/GetSystemTimes, net_stats); relay ping = bflist.exe PING every 2 s ->
+  "BFNP" report to net.c. Screen capture of the full-screen window comes out black; ask the user to look.
 - Milestone 101 (hit marker): hitmarker.wav (from the user's clip) plays when the player's shot hits a character. Hook on the
   bullet ray call 0x2309ED (0x230040, stdcall 6 args; result arg4: +0x34 = SHOOTER, +0x44 = object hit; a character when
   [[obj+0xC]+4] == 3; alive when health, a float at character +0x54, is above 0) and on the pass-through path 0x2309CB

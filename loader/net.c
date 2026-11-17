@@ -133,6 +133,7 @@ static u16 bswap16(u16 v) { return (u16)((v >> 8) | (v << 8)); }
 static struct { SIN a; u32 seen, listed; } g_peer[NPEER];   /* host: the other players; client: [0] = the host; list mode: listed matches + players who contacted us */
 static u32 g_npeer;
 static u32 g_tx_frames, g_rx_frames, g_rx_drop, g_fwd;
+static u32 g_relay_rtt, g_relay_up, g_relay_heard;   /* the relay helper's latest ping report (BFNP, every 2 s) */
 
 static int net_open(void) {
     static int tried; if (tried) return g_sock != 0xFFFFFFFF; tried = 1;
@@ -261,9 +262,11 @@ static void deliver_local(const u8 *f, u32 len);
 static void rx_frame(const u8 *f, u32 len);
 static void frame_log(const char *what, const u8 *f, u32 len) {   /* the first bytes of a frame -> the log: the first 3 of each kind (direction, size, broadcast or not, UDP port) */
     static u32 kinds[64], kn[64], nk; u32 key = (u32)what[0] * 131 + len * 7 + (len >= 14 ? (f[0] & 1) * 3 : 0) + (len >= 38 ? (u32)f[36] << 8 | f[37] : 0) * 1009, i = 0;
-    for (; i < nk && kinds[i] != key; i++) ; if (i == nk) { if (nk == 64) return; kinds[nk] = key; kn[nk++] = 0; } if (kn[i]++ >= 3) return;
+    for (; i < nk && kinds[i] != key; i++) ; if (i == nk) { if (nk == 64) return; kinds[nk] = key; kn[nk++] = 0; } if (kn[i]++ >= ((len == 82 || len == 714) ? 40u : 3u)) return;
     static const char hx[] = "0123456789ABCDEF"; out("  [frame] "); out(what); out(" len "); dec(len); out(":");
-    for (u32 i = 0; i < len && i < 64; i++) { char b[4] = {' ', hx[f[i] >> 4], hx[f[i] & 15], 0}; out(b); } out("\r\n"); }
+    for (u32 i = 0; i < len && i < 64; i++) { char b[4] = {' ', hx[f[i] >> 4], hx[f[i] & 15], 0}; out(b); }
+    if (len > 64) { out(" ... end:"); for (u32 i = len - 16; i < len; i++) { char b[4] = {' ', hx[f[i] >> 4], hx[f[i] & 15], 0}; out(b); } }
+    out("\r\n"); }
 /* A built-in address server (the console's own requests never leave this PC). Without it the console never got an IP address:
    its match reply carried address 0.0.0.0 and the joining console ignored it. Each console gets 10.<last 3 bytes of its MAC>,
    mask 255.0.0.0, gateway / server 10.0.0.1 (a made-up machine whose ARP is answered here too). Lock held (called from tx). */
@@ -356,6 +359,13 @@ static void deliver_local(const u8 *f, u32 len) {
     frame_log("received", f, len); lock(); rx_frame(f, len); unlock();
 }
 
+/* performance panel (gpu.c perf_sample): totals so far and the relay state: 0 no online play, 1 relay not connected,
+   2 relay connected (ping = round trip to the relay, ms), 3 direct play (host / join) */
+void net_stats(u32 *sent, u32 *recv, u32 *drop, u32 *state, u32 *ping) {
+    *sent = g_tx_frames; *recv = g_rx_frames; *drop = g_rx_drop; *ping = 0;
+    if (g_on <= 0) *state = 0;
+    else if (g_relay) { u32 fresh = g_relay_heard && GetTickCount() - g_relay_heard < 6000; *state = (fresh && g_relay_up) ? 2 : 1; if (*state == 2) *ping = g_relay_rtt; }
+    else *state = 3; }
 u32 nic_rd(u32 off) {
     u32 v;
     lock();
@@ -412,6 +422,8 @@ void nic_service(void) {
             if (n > 8) deliver_local(b + 8, (u32)n - 8);
             continue; }
         if (g_online) {   /* from the server: "BFN2" + room + frame (only our room's) */
+            if (n >= 12 && *(u32 *)b == 0x504E4642 /* "BFNP": the relay helper's ping report */ && from.addr == 0x0100007F) {
+                g_relay_rtt = ((u32 *)b)[1]; g_relay_up = ((u32 *)b)[2]; g_relay_heard = now | 1; continue; }
             if (n < 8 || *(u32 *)b != MAGIC2 || *(u32 *)(b + 4) != g_room) break;
             if (g_npeer) g_peer[0].seen = now;
             if (n > 8) deliver_local(b + 8, (u32)n - 8);

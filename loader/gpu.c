@@ -110,7 +110,7 @@ static void method(u32 sub, u32 m, u32 v) {
     case 0x17C8: if (v == 1) { render_flush(); void render_gl_zpass(u32, u32); render_gl_zpass(0, 0); } break;   /* CLEAR_REPORT_VALUE (zpass) */
     case 0x17CC: { render_flush(); void render_gl_zpass(u32, u32); render_gl_zpass(1, v); } break;              /* SET_ZPASS_PIXEL_COUNT_ENABLE */
     case 0x17D0: if ((v >> 24) == 1) { render_flush(); void render_gl_zpass(u32, u32); render_gl_zpass(2, v & 0xFFFFFF); } break;   /* GET_REPORT */
-    case 0x0130: g_flips++; g_flips_total++; if (g_flip_stall_on) g_flip_stall = 1;
+    case 0x0130: { void perf_flip(void); perf_flip(); } g_flips++; g_flips_total++; if (g_flip_stall_on) g_flip_stall = 1;
         if (kel[0x210 / 4] != g_flip_surf) g_prev_surf = g_flip_surf; g_flip_surf = kel[0x210 / 4]; g_flip_drawn = g_draws_since_flip != 0; g_draws_since_flip = 0; break;   /* FLIP_STALL: wait for the vblank (Milestone 86) */
     }
 }
@@ -255,8 +255,37 @@ static u32 g_stat_t;
 IMP DWORD WINAPI GetCurrentProcessId(void);
 u32 *gpu_pad(void) { if (g_ringp && !g_ringp->pad[24]) g_ringp->pad[24] = GetCurrentProcessId(); return g_ringp ? g_ringp->pad : 0; }   /* heartbeats for the viewer's freeze probe: [20] canary, [21] ticker, [22] kernel calls */
 u32 gpu_vsync_count(void) { return g_ringp ? g_ringp->pad[9] : 0; }   /* the monitor's refreshes, counted by the viewer */
+/* Performance panel (F3 in the game window): once a second the loader's numbers go to RING pad[84..93]; the viewer adds its
+   own and shows them (bfgl.c perf_draw). [84] game frames/s, [85] slowest game frame (0.1 ms), [86] game process CPU (0.1 %
+   of the whole PC), [87] whole PC CPU (0.1 %), [88] network frames sent/s, [89] received/s, [90] network state (net_stats),
+   [91] relay ping ms, [92] update counter, [93] network frames dropped/s */
+IMP void *WINAPI GetCurrentProcess(void);
+IMP BOOL WINAPI GetProcessTimes(void *, u64 *, u64 *, u64 *, u64 *);
+IMP BOOL WINAPI GetSystemTimes(u64 *, u64 *, u64 *);
+static s64 g_pf_last, g_pf_freq; static u32 g_pf_worst, g_pf_n;   /* the time of the last flip; the longest gap (0.1 ms) this second */
+void perf_flip(void) {
+    s64 t; QueryPerformanceCounter(&t); if (!g_pf_freq) QueryPerformanceFrequency(&g_pf_freq);
+    if (g_pf_last) { u32 d = (u32)((t - g_pf_last) * 10000 / g_pf_freq); if (d > g_pf_worst) g_pf_worst = d; }
+    g_pf_last = t; g_pf_n++; }
+static void perf_sample(u32 now_ms) {
+    static u32 tl, lf, ls, lr, ld; static u64 lpk, lpu, lsi, lsk, lsu; static s64 lt;
+    if (!g_ringp || now_ms - tl < 1000) return; tl = now_ms;
+    s64 t; QueryPerformanceCounter(&t); if (!g_pf_freq) QueryPerformanceFrequency(&g_pf_freq);
+    u32 *p = g_ringp->pad;
+    u32 ms = lt ? (u32)((t - lt) * 1000 / g_pf_freq) : 1000; if (!ms) ms = 1; lt = t;
+    p[84] = (g_pf_n * 1000 + ms / 2) / ms; g_pf_n = 0;
+    {   /* the slowest frame: also counts a frame still waiting now (a freeze shows while it lasts) */
+        u32 w = g_pf_worst; if (g_pf_last) { u32 open = (u32)((t - g_pf_last) * 10000 / g_pf_freq); if (open > w) w = open; } p[85] = w; g_pf_worst = 0; }
+    {   u64 c, e, k, u, si, sk, su; if (GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u) && GetSystemTimes(&si, &sk, &su)) {
+            u64 tot = (sk - lsk) + (su - lsu), busy = tot - (si - lsi), mine = (k - lpk) + (u - lpu);   /* system kernel time includes idle time */
+            if (lsk && tot) { p[86] = (u32)(mine * 1000 / tot); p[87] = (u32)(busy * 1000 / tot); }
+            lpk = k; lpu = u; lsi = si; lsk = sk; lsu = su; } }
+    {   void net_stats(u32 *, u32 *, u32 *, u32 *, u32 *); u32 sn, rc, dr, st, pg; net_stats(&sn, &rc, &dr, &st, &pg);
+        p[88] = (sn - ls) * 1000 / ms; p[89] = (rc - lr) * 1000 / ms; p[93] = (dr - ld) * 1000 / ms; ls = sn; lr = rc; ld = dr; p[90] = st; p[91] = pg; }
+    p[92]++; (void)lf; }
 int gpu_has_work(void) { return !g_nop_wait && !g_flip_stall && NV(0x800044) != NV(0x800040); }
 void gpu_process(u32 now_ms) {
+    perf_sample(now_ms);
     {   /* the GPU path: wait (up to 8 s) for the viewer to say whether it can draw, then report fences it has reached */
         extern int g_gl; static int asked; void render_gl_init(RING *);
         if (!asked && g_ringp) { if (g_ringp->gl_ok || g_ringp->gl_failed || now_ms > 8000) { asked = 1; render_gl_init(g_ringp);

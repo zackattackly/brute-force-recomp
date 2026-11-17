@@ -447,6 +447,7 @@ static void NTAPI XcSHAFinal(SHA *c, u8 *dig) {
     for (int i = 7; i >= 0; i--) { u8 b = (u8)(bits >> (i * 8)); XcSHAUpdate(c, &b, 1); }
     for (int i = 0; i < 20; i++) dig[i] = (u8)(c->h[i / 4] >> (24 - (i % 4) * 8));
 }
+static void hmac_hex(const u8 *p, u32 n, u32 mx) { static const char hx[] = "0123456789ABCDEF"; for (u32 i = 0; i < n && i < mx; i++) { char t[4] = {' ', hx[p[i] >> 4], hx[p[i] & 15], 0}; out(t); } }
 static void NTAPI XcHMAC(const u8 *key, u32 kl, const u8 *a, u32 al, const u8 *b, u32 bl, u8 *dig) {
     u8 k[64], pad[64], inner[20]; SHA c; memset_(k, 0, 64);
     if (kl > 64) { XcSHAInit(&c); XcSHAUpdate(&c, key, kl); XcSHAFinal(&c, k); } else memcpy_(k, key, kl);
@@ -454,6 +455,10 @@ static void NTAPI XcHMAC(const u8 *key, u32 kl, const u8 *a, u32 al, const u8 *b
     XcSHAInit(&c); XcSHAUpdate(&c, pad, 64); if (a) XcSHAUpdate(&c, a, al); if (b) XcSHAUpdate(&c, b, bl); XcSHAFinal(&c, inner);
     for (int i = 0; i < 64; i++) pad[i] = k[i] ^ 0x5C;
     XcSHAInit(&c); XcSHAUpdate(&c, pad, 64); XcSHAUpdate(&c, inner, 20); XcSHAFinal(&c, dig);
+    {   static u32 nl; if (nl < 400) { nl++;   /* Milestone 106: what the game signs / checks (System Link packets): the first 80 calls */
+            out("  [hmac] from "); hex((u32)__builtin_return_address(0)); out(" key "); dec(kl); out(":"); hmac_hex(key, kl, 32);
+            out(" | a "); dec(al); out(":"); if (a) hmac_hex(a, al, 96); out(" | b "); dec(bl); out(":"); if (b) hmac_hex(b, bl, 32);
+            out(" | ="); hmac_hex(dig, 20, 20); out("\r\n"); } }
 }
 static void NTAPI XcRC4Key(u8 *s, u32 kl, const u8 *key) {
     for (int i = 0; i < 256; i++) s[i] = (u8)i;
