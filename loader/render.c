@@ -287,11 +287,24 @@ static u32 *ring_alloc(u32 n) {
     }
 }
 static void ring_commit(u32 *p, u32 n) { __sync_synchronize(); g_ring->wpos = (u32)(p - g_rbuf) + n; g_gl_words += n; }
+IMP DWORD WINAPI GetFileAttributesA(const char *);
+extern u32 g_kdirty[64], g_kdlist[0x800], g_kdn;
 static void gl_state(int force) {
-    if (!force && g_kel_sent && !__builtin_memcmp(kel, g_last_kel, sizeof g_last_kel)) return;
-    u32 *p = ring_alloc(1 + 0x800); if (!p) return;
-    p[0] = CMD_STATE << 24 | (1 + 0x800); memcpy_(p + 1, kel, 0x2000); ring_commit(p, 1 + 0x800);
-    memcpy_(g_last_kel, kel, sizeof g_last_kel); g_kel_sent = 1;
+    /* Performance: the whole 8 KB register block went to the viewer before ~46,000 draws a second (~370 MB/s copied on both
+       sides); now only the registers that changed (gpu.c keeps the list) go, as (index, value) pairs. fullstate.txt = old way. */
+    static int full = -1; if (full < 0) full = GetFileAttributesA("fullstate.txt") != 0xFFFFFFFF;
+    if (force || !g_kel_sent || full || g_kdn > 0x300) {
+        if (!force && g_kel_sent && full && !__builtin_memcmp(kel, g_last_kel, sizeof g_last_kel)) goto clear;
+        u32 *p = ring_alloc(1 + 0x800); if (!p) return;
+        p[0] = CMD_STATE << 24 | (1 + 0x800); memcpy_(p + 1, kel, 0x2000); ring_commit(p, 1 + 0x800);
+        memcpy_(g_last_kel, kel, sizeof g_last_kel); g_kel_sent = 1; goto clear; }
+    {   if (!g_kdn) return;
+        u32 cnt = 0; for (u32 k = 0; k < g_kdn; k++) { u32 i = g_kdlist[k]; if (kel[i] != g_last_kel[i]) cnt++; }
+        if (cnt) { u32 *p = ring_alloc(1 + cnt * 2); if (!p) return; u32 q = 1;
+            for (u32 k = 0; k < g_kdn; k++) { u32 i = g_kdlist[k]; if (kel[i] != g_last_kel[i]) { p[q++] = i; p[q++] = kel[i]; g_last_kel[i] = kel[i]; } }
+            p[0] = CMD_STATE_DELTA << 24 | (1 + cnt * 2); ring_commit(p, 1 + cnt * 2); } }
+clear:
+    for (u32 k = 0; k < g_kdn; k++) { u32 i = g_kdlist[k]; g_kdirty[i >> 5] &= ~(1u << (i & 31)); } g_kdn = 0;
 }
 static void gl_draw(u32 mode, OV *v, u32 n) {
     if (!n) return;

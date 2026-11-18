@@ -79,7 +79,7 @@ GL_FN(void, glGetShaderiv, (GLuint, GLenum, GLint *)) GL_FN(void, glGetShaderInf
 GL_FN(void, glAttachShader, (GLuint, GLuint)) GL_FN(void, glLinkProgram, (GLuint)) GL_FN(void, glGetProgramiv, (GLuint, GLenum, GLint *)) GL_FN(void, glGetProgramInfoLog, (GLuint, GLsizei, GLsizei *, GLchar *))
 GL_FN(void, glUseProgram, (GLuint)) GL_FN(GLint, glGetUniformLocation, (GLuint, const GLchar *)) GL_FN(void, glUniform1i, (GLint, GLint)) GL_FN(void, glUniform4fv, (GLint, GLsizei, const GLfloat *))
 GL_FN(void, glUniform4iv, (GLint, GLsizei, const GLint *)) GL_FN(void, glUniform2iv, (GLint, GLsizei, const GLint *)) GL_FN(void, glUniform4f, (GLint, f32, f32, f32, f32)) GL_FN(void, glUniform2f, (GLint, f32, f32))
-GL_FN(void, glVertexAttribPointer, (GLuint, GLint, GLenum, GLboolean, GLsizei, const void *)) GL_FN(void, glEnableVertexAttribArray, (GLuint)) GL_FN(void, glBindAttribLocation, (GLuint, GLuint, const GLchar *))
+GL_FN(void, glDeleteProgram, (GLuint)) GL_FN(void, glVertexAttribPointer, (GLuint, GLint, GLenum, GLboolean, GLsizei, const void *)) GL_FN(void, glEnableVertexAttribArray, (GLuint)) GL_FN(void, glBindAttribLocation, (GLuint, GLuint, const GLchar *))
 GL_FN(void, glBlendEquation, (GLenum)) GL_FN(void, glBlendColor, (f32, f32, f32, f32)) GL_FN(void, glActiveTexture, (GLenum)) GL_FN(void, glGenVertexArrays, (GLsizei, GLuint *)) GL_FN(void, glBindVertexArray, (GLuint))
 GL_FN(void, glBindFragDataLocation, (GLuint, GLuint, const GLchar *)) GL_FN(void, glGenerateMipmap, (GLenum))
 
@@ -518,7 +518,7 @@ static const char *g_fs =
 static GLuint g_prog, g_vbo, g_vao;
 static GLint u_vp, u_tmode, u_tscale, u_nst, u_muxmsb, u_crg, u_crep, u_cmap, u_arg, u_aal, u_amap, u_cdst, u_adst, u_op, u_f0, u_f1, u_fog, u_fa, u_fb, u_frep, u_finv, u_atest, u_c, u_fogp, u_fogon, u_shadow, u_zscale, u_sbias, u_hud, u_pr, u_pon;
 /* one linked program: its uniform locations (copied into the globals above when it is used) */
-typedef struct { u32 key, used, cgen, ustate; GLuint id; GLint loc[31]; f32 hud[2]; } PROG;   /* ustate: hash of the state its uniforms were set for */   /* cgen: the constants generation it last got */   /* hud: the u_hud it holds */
+typedef struct { u32 key, used, cgen, ustate; GLuint id; GLint loc[31]; f32 hud[2]; f32 vp[4]; u32 ptouch; GLuint vs; } PROG;   /* ustate: hash of the state its uniforms were set for */   /* cgen: the constants generation it last got */   /* hud: the u_hud it holds */
 #define ULIST(X) X(u_vp) X(u_tmode) X(u_tscale) X(u_nst) X(u_muxmsb) X(u_crg) X(u_crep) X(u_cmap) X(u_arg) X(u_aal) X(u_amap) X(u_cdst) X(u_adst) X(u_op) X(u_f0) X(u_f1) X(u_fog) X(u_fa) X(u_fb) X(u_frep) X(u_finv) X(u_atest) X(u_c) X(u_fogp) X(u_fogon) X(u_shadow) X(u_zscale) X(u_sbias) X(u_hud) X(u_pr) X(u_pon)
 /* Milestone 96: the 2D HUD in a widescreen window. Screen-space vertices (w == 1) are squeezed horizontally by u_hud.x (= 4:3 / window
    aspect) about the x u_hud.y: 0, 320 or 640 by the screen third the draw's centre is in, so each piece keeps its shape and its side of
@@ -607,6 +607,102 @@ static void dep_color(DEP *d) {
     glTexParameteri(0x0DE1, 0x90EA, 0x1902 /* DEPTH_COMPONENT */); glTexParameteri(0x0DE1, 0x2801, 0x2601); glTexParameteri(0x0DE1, 0x2800, 0x2601);
     g_curp = 0; g_hs_surf = g_hs_rast = 0; g_r->pad[48]++;
 }
+/* ---- specialised pixel shaders (performance) ----
+   g_fs emulates every NV2A combiner setting per pixel from uniforms (dynamic register indexing, up to 8 stages): at 1280x960 the GPU
+   was ~77% busy in busy scenes (32% at 640x480). Each combination of vertex program and combiner setup now gets its own program whose
+   pixel shader has the setup as constants, so the compiler unrolls the stages and drops what is unused. The general shader stays as
+   the fallback (compile failure, or nospecfs.txt at start). Values (sv): tmode[4] shadow[4] fogon nst mux crg crep cmap arg aal amap
+   cdst adst [8 x 4 each] op[16] fa[4] fb[4] frep[4] finv[4]. */
+#define SV_N 299
+static int g_spec = -1; static u32 g_spec_fail, g_spec_built;
+static char g_fs_head[16384], g_fs_tail[16384], g_fs_post[16384];   /* tail = up to the combiner loop, post = after it */
+typedef struct { u32 key; GLuint fs; } FSC;
+#define NFSC 512
+static FSC g_fsc[NFSC]; static u32 g_nfsc;
+typedef struct { PROG *base; u32 vkey, fkey, used; PROG p; } SPC;
+#define NSPC 768
+static SPC g_spc[NSPC];
+static PROG *g_state_q;
+static int sp_find(const char *s, const char *pat) { for (int i = 0; s[i]; i++) { int k = 0; while (pat[k] && s[i + k] == pat[k]) k++; if (!pat[k]) return i; } return -1; }
+static void sp_remove(char *s, const char *pat) { int i = sp_find(s, pat); if (i < 0) return; int n = 0; while (pat[n]) n++; int j = i; while ((s[j] = s[j + n]) != 0) j++; }
+static void spec_init(void) {
+    g_spec = GetFileAttributesA("nospecfs.txt") == 0xFFFFFFFF;
+    static char t[16384]; int n = 0; while (g_fs[n] && n < (int)sizeof t - 1) { t[n] = g_fs[n]; n++; } t[n] = 0;
+    sp_remove(t, " uniform ivec4 u_shadow;"); sp_remove(t, " uniform int u_fogon;"); sp_remove(t, "uniform ivec4 u_tmode; ");
+    sp_remove(t, "uniform int u_nst, u_muxmsb;\n"); sp_remove(t, "uniform ivec4 u_crg[8], u_crep[8], u_cmap[8], u_arg[8], u_aal[8], u_amap[8], u_cdst[8], u_adst[8];\n");
+    sp_remove(t, "uniform ivec2 u_op[8];\n"); sp_remove(t, "uniform ivec4 u_fa, u_fb, u_frep, u_finv;\n");
+    int m = sp_find(t, "out vec4 o_col;\n"); if (m < 0 || n > 16000) { g_spec = 0; return; }
+    m += 16; for (int i = 0; i < m; i++) g_fs_head[i] = t[i]; g_fs_head[m] = 0;
+    int a = sp_find(t + m, "  for (int s = 0; s < u_nst; s++) {\n"), b = sp_find(t + m, "  vec4 E = fin("); if (a < 0 || b < a) { g_spec = 0; return; }
+    for (int k = 0; k < a; k++) g_fs_tail[k] = t[m + k]; g_fs_tail[a] = 0;
+    int k = 0; while (t[m + b + k]) { g_fs_post[k] = t[m + b + k]; k++; } g_fs_post[k] = 0; }
+static char *sp_s(char *o, const char *s) { while (*s) *o++ = *s++; return o; }
+static char *sp_i(char *o, s32 v) { if (v < 0) { *o++ = '-'; v = -v; } char d[12]; int z = 0; do d[z++] = (char)('0' + v % 10); while (v /= 10); while (z) *o++ = d[--z]; return o; }
+static char *sp_v(char *o, const char *ty, const GLint *v, int n) { o = sp_s(o, ty); *o++ = '('; for (int i = 0; i < n; i++) { if (i) *o++ = ','; o = sp_i(o, v[i]); } *o++ = ')'; return o; }
+static char *sp_arr(char *o, const char *name, const GLint *v, int w) {   /* const ivecW name[8] = ivecW[8](...); */
+    const char *ty = w == 4 ? "ivec4" : "ivec2"; o = sp_s(o, "const "); o = sp_s(o, ty); *o++ = ' '; o = sp_s(o, name); o = sp_s(o, "[8] = "); o = sp_s(o, ty); o = sp_s(o, "[8](");
+    for (int s = 0; s < 8; s++) { if (s) *o++ = ','; o = sp_v(o, ty, v + s * w, w); } return sp_s(o, ");\n"); }
+static GLuint fs_spec(const GLint *sv, u32 key) {
+    for (u32 i = 0; i < g_nfsc; i++) if (g_fsc[i].key == key) return g_fsc[i].fs;
+    static char src[32768]; char *o = src;
+    o = sp_s(o, g_fs_head);
+    o = sp_s(o, "const ivec4 u_tmode = "); o = sp_v(o, "ivec4", sv, 4); o = sp_s(o, ";\nconst ivec4 u_shadow = "); o = sp_v(o, "ivec4", sv + 4, 4);
+    o = sp_s(o, ";\nconst int u_fogon = "); o = sp_i(o, sv[8]); o = sp_s(o, ";\nconst int u_nst = "); o = sp_i(o, sv[9]); o = sp_s(o, ";\nconst int u_muxmsb = "); o = sp_i(o, sv[10]); o = sp_s(o, ";\n");
+    o = sp_s(o, "const ivec4 u_fa = "); o = sp_v(o, "ivec4", sv + 283, 4); o = sp_s(o, ";\nconst ivec4 u_fb = "); o = sp_v(o, "ivec4", sv + 287, 4);
+    o = sp_s(o, ";\nconst ivec4 u_frep = "); o = sp_v(o, "ivec4", sv + 291, 4); o = sp_s(o, ";\nconst ivec4 u_finv = "); o = sp_v(o, "ivec4", sv + 295, 4); o = sp_s(o, ";\n");
+    o = sp_s(o, g_fs_tail);
+    {   const GLint *crg = sv + 11, *crep = sv + 43, *cmap = sv + 75, *arg = sv + 107, *aal = sv + 139, *amap = sv + 171, *cdst = sv + 203, *adst = sv + 235, *op = sv + 267;
+        for (int st = 0; st < sv[9]; st++) {
+            o = sp_s(o, "  { R[1] = u_f0["); o = sp_i(o, st); o = sp_s(o, "]; R[2] = u_f1["); o = sp_i(o, st); o = sp_s(o, "];\n");
+            for (int j = 0; j < 4; j++) { int q = st * 4 + j;
+                o = sp_s(o, "    vec4 I"); o = sp_i(o, j); o = sp_s(o, "; { vec3 cc = ");
+                if (crep[q]) { o = sp_s(o, "vec3(R["); o = sp_i(o, crg[q]); o = sp_s(o, "].a)"); } else { o = sp_s(o, "R["); o = sp_i(o, crg[q]); o = sp_s(o, "].rgb"); }
+                o = sp_s(o, "; float aa = R["); o = sp_i(o, arg[q]); o = sp_s(o, aal[q] ? "].a; I" : "].b; I"); o = sp_i(o, j);
+                o = sp_s(o, " = vec4(mapf(cc.r, "); o = sp_i(o, cmap[q]); o = sp_s(o, "), mapf(cc.g, "); o = sp_i(o, cmap[q]); o = sp_s(o, "), mapf(cc.b, "); o = sp_i(o, cmap[q]);
+                o = sp_s(o, "), mapf(aa, "); o = sp_i(o, amap[q]); o = sp_s(o, ")); }\n"); }
+            int fl = cdst[st * 4 + 3];
+            o = sp_s(o, "    vec4 AB = I0 * I1, CD = I2 * I3;\n");
+            if (fl & 1) o = sp_s(o, "    AB.rgb = vec3(dot(I0.rgb, I1.rgb));\n");
+            if (fl & 2) o = sp_s(o, "    CD.rgb = vec3(dot(I2.rgb, I3.rgb));\n");
+            o = sp_s(o, "    vec4 SUM = AB + CD;\n");
+            if ((fl & 4) || adst[st * 4 + 3]) {
+                o = sp_s(o, sv[10] ? "    bool sel = R[12].a >= 0.5;\n" : "    bool sel = (int(clamp(R[12].a, 0.0, 1.0) * 255.0 + 0.5) & 1) != 0;\n");
+                o = sp_s(o, "    vec4 MX = sel ? CD : AB;\n");
+                if (fl & 4) o = sp_s(o, "    SUM.rgb = MX.rgb;\n");
+                if (adst[st * 4 + 3]) o = sp_s(o, "    SUM.a = MX.a;\n"); }
+            o = sp_s(o, "    ivec2 OP = ivec2("); o = sp_i(o, op[st * 2]); *o++ = ','; o = sp_i(o, op[st * 2 + 1]); o = sp_s(o, "); AB = opv(AB, OP); CD = opv(CD, OP); SUM = opv(SUM, OP);\n");
+            if (cdst[st * 4]) { o = sp_s(o, "    R["); o = sp_i(o, cdst[st * 4]); o = sp_s(o, "].rgb = AB.rgb;\n"); if (fl & 8) { o = sp_s(o, "    R["); o = sp_i(o, cdst[st * 4]); o = sp_s(o, "].a = AB.b;\n"); } }
+            if (cdst[st * 4 + 1]) { o = sp_s(o, "    R["); o = sp_i(o, cdst[st * 4 + 1]); o = sp_s(o, "].rgb = CD.rgb;\n"); if (fl & 16) { o = sp_s(o, "    R["); o = sp_i(o, cdst[st * 4 + 1]); o = sp_s(o, "].a = CD.b;\n"); } }
+            if (cdst[st * 4 + 2]) { o = sp_s(o, "    R["); o = sp_i(o, cdst[st * 4 + 2]); o = sp_s(o, "].rgb = SUM.rgb;\n"); }
+            if (adst[st * 4]) { o = sp_s(o, "    R["); o = sp_i(o, adst[st * 4]); o = sp_s(o, "].a = AB.a;\n"); }
+            if (adst[st * 4 + 1]) { o = sp_s(o, "    R["); o = sp_i(o, adst[st * 4 + 1]); o = sp_s(o, "].a = CD.a;\n"); }
+            if (adst[st * 4 + 2]) { o = sp_s(o, "    R["); o = sp_i(o, adst[st * 4 + 2]); o = sp_s(o, "].a = SUM.a;\n"); }
+            o = sp_s(o, "  }\n"); } }
+    o = sp_s(o, g_fs_post); *o = 0;
+    GLuint fs = compile(0x8B30, src);
+    { static int d; if (!d || !fs) { d = 1; HANDLE fh = CreateFileA(fs ? "spec_fs_sample.txt" : "spec_fs_failed.txt", 0x40000000, 0, 0, 2, 0x80, 0); if (fh != (HANDLE)-1) { DWORD w; u32 n = 0; while (src[n]) n++; WriteFile(fh, src, n, &w, 0); CloseHandle(fh); } } }
+    if (g_nfsc == NFSC) g_nfsc = 0;   /* full: start over (old shader objects stay attached to their programs) */
+    g_fsc[g_nfsc].key = key; g_fsc[g_nfsc].fs = fs; g_nfsc++;
+    if (!fs) g_spec_fail++;
+    return fs; }
+static PROG *spec_prog(PROG *P, const GLint *sv) {
+    if (g_spec <= 0 || !P->vs) return P;
+    u32 fk = 2166136261u; for (int i = 0; i < SV_N; i++) fk = (fk ^ (u32)sv[i]) * 16777619u;
+    static u32 clock; clock++;
+    SPC *old = &g_spc[0];
+    for (u32 i = 0; i < NSPC; i++) { SPC *c = &g_spc[i];
+        if (c->p.id && c->base == P && c->vkey == P->key && c->fkey == fk) { c->used = clock; return &c->p; }
+        if (!c->p.id) { if (old->p.id) old = c; } else if (old->p.id && c->used < old->used) old = c; }
+    GLuint fs = fs_spec(sv, fk); if (!fs) return P;
+    SPC *e = old; if (e->p.id) { if (g_curp == &e->p) g_curp = 0; if (g_state_q == &e->p) g_state_q = 0; glDeleteProgram(e->p.id); e->p.id = 0; }
+    GLuint id = glCreateProgram(); glAttachShader(id, P->vs); glAttachShader(id, fs);
+    if (P == &g_fixedp) { static const char *a8[8] = {"a_pos", "a_d0", "a_d1", "a_t0", "a_t1", "a_t2", "a_t3", "a_fog"}; for (u32 i = 0; i < 8; i++) glBindAttribLocation(id, i, a8[i]); }
+    else for (u32 i = 0; i < 16; i++) { char nm[4] = {'v', 0, 0, 0}; if (i >= 10) { nm[1] = '1'; nm[2] = (char)('0' + i - 10); } else nm[1] = (char)('0' + i); glBindAttribLocation(id, i, nm); }
+    glBindFragDataLocation(id, 0, "o_col"); glLinkProgram(id);
+    GLint ok = 0; glGetProgramiv(id, 0x8B82, &ok); if (!ok) { glDeleteProgram(id); g_spec_fail++; return P; }
+    zero(&e->p, sizeof e->p); e->p.id = id; e->p.key = P->key ^ fk; e->p.vs = P->vs; e->base = P; e->vkey = P->key; e->fkey = fk; e->used = clock;
+    prog_locs(&e->p); g_curp = 0; g_spec_built++;
+    return &e->p; }
 static int apply_state(PROG *P) {
     {   /* depth buffers read as colour textures: convert before any of this draw's state is set */
         static u32 dc = 2; if (dc == 2) dc = GetFileAttributesA("nodepthcolor.txt") == 0xFFFFFFFF;
@@ -777,13 +873,12 @@ static int apply_state(PROG *P) {
     f32 wk = (W * 3 == H * 4) ? g_wide_k : 0.0f;   /* Milestone 96: widescreen squeeze on every 4:3 target (the screen and the copies of it the effects draw at
                                                      320x240, 160x120, 80x60; squeezing only the screen doubled the depth-of-field image), not on square shadow maps */
     hu ^= *(u32 *)&wk * 0x85EBCA6Bu;
-    if (P->ustate == hu) return 1;
-    P->ustate = hu;
-    glUniform4f(u_vp, 2.0f / W, 2.0f / H, 2.0f / zmax, wk);
-    glUniform4iv(u_tmode, 1, tmode); glUniform4fv(u_tscale, 4, tsc); glUniform4iv(u_shadow, 1, g_shad_c); glUniform4fv(u_zscale, 1, g_zs_c); glUniform4fv(u_sbias, 1, g_sb_c);
-    /* register combiners */
+    /* register combiners (computed first: the specialised program depends on them) */
     u32 ctl = K(0x1E60), ns = ctl & 0xFF; if (ns > 8) ns = 8; if (!ns) ns = 1;
-    GLint crg[32], crep[32], cmap[32], arg[32], aal[32], amap[32], cdst[32], adst[32], op[16]; f32 f0[32], f1[32];
+    GLint sv[SV_N]; f32 f0[32], f1[32];
+    GLint *crg = sv + 11, *crep = sv + 43, *cmap = sv + 75, *arg = sv + 107, *aal = sv + 139, *amap = sv + 171, *cdst = sv + 203, *adst = sv + 235, *op = sv + 267;
+    for (u32 i = 0; i < 4; i++) { sv[i] = tmode[i]; sv[4 + i] = g_shad_c[i]; }
+    sv[8] = K(0x2A4) && g_ab != 2 ? 1 : 0; sv[9] = (GLint)ns; sv[10] = (GLint)((ctl >> 8) & 1);
     for (u32 s = 0; s < 8; s++) {
         u32 ci = K(0xAC0 + s * 4), ai = K(0x260 + s * 4), co = K(0x1E40 + s * 4), ao = K(0xAA0 + s * 4);
         for (u32 j = 0; j < 4; j++) {
@@ -797,15 +892,22 @@ static int apply_state(PROG *P) {
         op[s * 2] = (co >> 15) & 7; op[s * 2 + 1] = (ao >> 15) & 7;
         unpack4(K(0xA60 + ((ctl & 0x1000) ? s : 0) * 4), &f0[s * 4]); unpack4(K(0xA80 + ((ctl & 0x10000) ? s : 0) * 4), &f1[s * 4]);
     }
+    u32 c0 = K(0x288), c1 = K(0x28C), b[7] = {c0 >> 24, (c0 >> 16) & 0xFF, (c0 >> 8) & 0xFF, c0 & 0xFF, c1 >> 24, (c1 >> 16) & 0xFF, (c1 >> 8) & 0xFF};
+    GLint *fa = sv + 283, *fbv = sv + 287, *frep = sv + 291, *finv = sv + 295;
+    fa[0] = b[0] & 15; fa[1] = b[1] & 15; fa[2] = b[2] & 15; fa[3] = b[3] & 15;
+    fbv[0] = b[4] & 15; fbv[1] = b[5] & 15; fbv[2] = b[6] & 15; fbv[3] = ((c1 >> 7) & 1) | ((c1 >> 6) & 1) << 1 | ((c1 >> 5) & 1) << 2;
+    for (u32 j = 0; j < 4; j++) { frep[j] = 0; finv[j] = 0; }
+    for (u32 j = 0; j < 4; j++) { frep[0] |= ((b[j] >> 4) & 1) << j; finv[0] |= ((b[j] >> 5) & 1) << j; }
+    for (u32 j = 4; j < 7; j++) { frep[1] |= ((b[j] >> 4) & 1) << (j - 4); finv[1] |= ((b[j] >> 5) & 1) << (j - 4); }
+    PROG *Q = spec_prog(P, sv); prog_use(Q); g_state_q = Q;
+    if (Q->ustate == hu) return 1;
+    Q->ustate = hu;
+    glUniform4f(u_vp, 2.0f / W, 2.0f / H, 2.0f / zmax, wk); Q->vp[0] = 2.0f / W; Q->vp[1] = 2.0f / H; Q->vp[2] = 2.0f / zmax; Q->vp[3] = wk;
+    glUniform4iv(u_tmode, 1, tmode); glUniform4fv(u_tscale, 4, tsc); glUniform4iv(u_shadow, 1, g_shad_c); glUniform4fv(u_zscale, 1, g_zs_c); glUniform4fv(u_sbias, 1, g_sb_c);
     glUniform1i(u_nst, ns); glUniform1i(u_muxmsb, (ctl >> 8) & 1);
     glUniform4iv(u_crg, 8, crg); glUniform4iv(u_crep, 8, crep); glUniform4iv(u_cmap, 8, cmap); glUniform4iv(u_arg, 8, arg); glUniform4iv(u_aal, 8, aal); glUniform4iv(u_amap, 8, amap);
     glUniform4iv(u_cdst, 8, cdst); glUniform4iv(u_adst, 8, adst); glUniform2iv(u_op, 8, op); glUniform4fv(u_f0, 8, f0); glUniform4fv(u_f1, 8, f1);
     f32 fog[4]; unpack4(K(0x2A8), fog); fog[3] = 1; glUniform4fv(u_fog, 1, fog);   /* fog not applied yet */
-    u32 c0 = K(0x288), c1 = K(0x28C), b[7] = {c0 >> 24, (c0 >> 16) & 0xFF, (c0 >> 8) & 0xFF, c0 & 0xFF, c1 >> 24, (c1 >> 16) & 0xFF, (c1 >> 8) & 0xFF};
-    GLint fa[4] = {b[0] & 15, b[1] & 15, b[2] & 15, b[3] & 15}, fbv[4] = {b[4] & 15, b[5] & 15, b[6] & 15, ((c1 >> 7) & 1) | ((c1 >> 6) & 1) << 1 | ((c1 >> 5) & 1) << 2};
-    GLint frep[4] = {0, 0, 0, 0}, finv[4] = {0, 0, 0, 0};
-    for (u32 j = 0; j < 4; j++) { frep[0] |= ((b[j] >> 4) & 1) << j; finv[0] |= ((b[j] >> 5) & 1) << j; }
-    for (u32 j = 4; j < 7; j++) { frep[1] |= ((b[j] >> 4) & 1) << (j - 4); finv[1] |= ((b[j] >> 5) & 1) << (j - 4); }
     glUniform4iv(u_fa, 1, fa); glUniform4iv(u_fb, 1, fbv); glUniform4iv(u_frep, 1, frep); glUniform4iv(u_finv, 1, finv);
     GLint at[2] = {K(0x300) ? (GLint)(K(0x33C) & 7) : -1, (GLint)(K(0x340) & 0xFF)}; glUniform2iv(u_atest, 1, at);
     {   /* fog (Milestone 82): 0x29C mode, 0x2A4 enable, 0x9C0 parameters */
@@ -899,7 +1001,7 @@ static PROG *vsh_program(void) {
     for (u32 i = 0; i < 16; i++) { char nm[4] = {'v', 0, 0, 0}; if (i >= 10) { nm[1] = '1'; nm[2] = '0' + i - 10; } else nm[1] = '0' + i; glBindAttribLocation(id, i, nm); }
     glBindFragDataLocation(id, 0, "o_col"); glLinkProgram(id);
     GLint ok = 0; glGetProgramiv(id, 0x8B82, &ok); if (!ok) { info(" vsh link failed"); return 0; }
-    p->id = id; p->key = h; p->used = g_frame; prog_locs(p); g_curp = 0;
+    p->id = id; p->key = h; p->used = g_frame; p->vs = vs; prog_locs(p); g_curp = 0;
     return p;
 }
 /* one attribute of vertex `idx` from its array, as 4 floats (the formats of render.c) */
@@ -916,6 +1018,15 @@ static void fetch(u32 i, u32 idx, f32 *c) {
     case 6: { u32 v = *(u32 *)p; c[0] = ((s32)(v << 21) >> 21) / 1023.0f; c[1] = ((s32)(v << 10) >> 21) / 1023.0f; c[2] = ((s32)v >> 22) / 511.0f; break; }
     }
 }
+static long long g_pr_t[28], g_pmk; static u32 g_pr_n[28], g_pr_w[28];
+/* GPU time per command type (perf panel on): every 8th command of a type is wrapped in a GL_TIME_ELAPSED query; results are
+   collected later (never waited for) and scaled by 8. */
+#define GQN 256
+static GLuint g_gq[GQN]; static u8 g_gq_type[GQN]; static u32 g_gq_head, g_gq_tail, g_gq_cnt[16]; static unsigned long long g_gpu_ns[16];
+#define PMS { QueryPerformanceCounter(&g_pmk); }
+#define PM(slot) { long long t_; QueryPerformanceCounter(&t_); g_pr_t[slot] += t_ - g_pmk; g_pr_n[slot]++; g_pmk = t_; }
+#define PT0 long long pt0_; QueryPerformanceCounter(&pt0_);
+#define PT1(slot) { long long pt1_; QueryPerformanceCounter(&pt1_); g_pr_t[slot] += pt1_ - pt0_; g_pr_n[slot]++; }
 static f32 *g_stage; static u32 *g_idxb;
 /* vertex data cache (Milestone 81): one GL buffer per Xbox memory range, re-uploaded only when its contents change
    (fingerprint: 128 sampled words and both ends) */
@@ -948,6 +1059,7 @@ static u32 g_state_ok;
 static int vsh_setup(PROG **pp) {
     PROG *p = vsh_program(); if (!p) return 0;
     if (!g_state_ok || g_state_prog != p) { if (!apply_state(p)) return 0; g_state_ok = 1; g_state_prog = p; }
+    if (g_state_q) { p = g_state_q; if (g_curp != p) prog_use(p); }   /* the specialised program apply_state chose */
     if (p->cgen != g_vcgen) { glUniform4fv(u_c, 192, &g_vc[0][0]); p->cgen = g_vcgen; }   /* only when they changed (Milestone 81) */
     *pp = p; return 1;
 }
@@ -1030,22 +1142,79 @@ static int razor_draw(u32 mode, u32 n, u32 nv, u32 mn, u32 mx, f32 *inl) {   /* 
    off (a one-sided wall the camera is behind still counts). At the flip the depth is read through two pixel-pack buffers (one
    frame late, no stall); the nearest distance goes to pad[80], pad[81] counts the readings. */
 static GLuint g_pfbo, g_ptex[2], g_ppbo[2]; static u32 g_pon, g_pseq, g_pdrawn, g_ppi, g_ppend[2]; static f32 g_pm[16], g_pnf[2], g_pnf_at[2][2];
-static void probe_draw(int indexed, u32 mode, u32 n) {
-    if (!g_pon || !g_pfbo || !g_cur_fb || g_cur_fb->w != 640 || g_cur_fb->h != 480 || !K(0x30C) || !K(0x35C) || K(0x304) || u_pr < 0) return;
+/* Performance: redrawing every 3D object into the probe switched render targets twice per object (~60,000 times a second in a busy
+   scene) and held busy scenes at ~37 fps (60 with the probe off). The objects are now split into g_pN groups by their vertex
+   address; one group per frame is drawn into the probe, whose depth is read back once a whole cycle is drawn (every g_pN frames).
+   probeevery.txt = the number of groups (default 1 since the probe is batched, below). */
+static u32 g_pN = 1, g_pphase;
+/* Performance (batched probe): each eligible draw is RECORDED (program, its viewport uniform, the vertex constants, the vertex
+   attribute setup, the indices or the immediate vertices) and all are drawn into the probe in one go at the flip (probe_replay):
+   one render-target switch per frame instead of two per draw. */
+typedef struct { GLuint buf; u32 off, stride; s32 size; u32 type; u8 on, norm; f32 c[4]; } PVA;
+typedef struct { PROG *p; u32 key, mode, n, ioff, cidx, imm, voff; f32 vp[4]; PVA a[16]; } PREC;
+#define PREC_N 4096
+#define PIDX_N (4u << 20)
+#define PVTX_N (8u << 20)
+#define PCON_N 1024
+static PREC *g_prec; static u32 *g_pidx; static u8 *g_pvtx; static f32 (*g_pcon)[192][4]; static u32 g_nprec, g_npidx, g_npvtx, g_npcon, g_pcon_gen;
+static PVA g_va[16];   /* the attribute setup of the indexed draw being made (probe_attrs) */
+static GLuint g_pibo, g_pvbo;
+static void probe_attrs(const u32 *lo, const u32 *glo, const u32 *grp, const GLuint *gbuf, const f32 *inl) {   /* mirrors do_draw_idx's attribute loop */
+    for (u32 i = 0; i < 16; i++) {
+        u32 f = K(0x1760 + i * 4), type = f & 0xF, size = (f >> 4) & 0xF, stride = (f >> 8) & 0xFF; PVA *a = &g_va[i];
+        a->on = 0; a->c[0] = inl[i * 4]; a->c[1] = inl[i * 4 + 1]; a->c[2] = inl[i * 4 + 2]; a->c[3] = inl[i * 4 + 3];
+        if (size && type == 6) { a->c[0] = 0; a->c[1] = 0; a->c[2] = 1; a->c[3] = 0; continue; }   /* CMP normals: lighting only */
+        if (!size || grp[i] == 0xFFFFFFFF) continue;
+        a->buf = gbuf[grp[i]]; a->off = lo[i] - glo[grp[i]]; a->stride = stride; a->on = 1; a->norm = 0;
+        switch (type) {
+        case 0: a->size = size == 4 ? 0x80E1 : (s32)size; a->type = 0x1401; a->norm = 1; break;
+        case 4: a->size = size; a->type = 0x1401; a->norm = 1; break;
+        case 1: a->size = size; a->type = 0x1402; a->norm = 1; break;
+        case 5: a->size = size; a->type = 0x1402; break;
+        case 2: a->size = size; a->type = 0x1406; break;
+        default: a->on = 0; break;
+        } } }
+static void probe_draw(int indexed, u32 mode, u32 n, const f32 *imm) {
+    if (!g_pon || !g_pfbo || !g_cur_fb || g_cur_fb->w != 640 || g_cur_fb->h != 480 || !K(0x30C) || !K(0x35C) || K(0x304) || u_pr < 0 || !g_curp) return;
+    if (g_pN > 1 && ((K(0x1720) & 0x03FFFFFF) * 2654435761u >> 20) % g_pN != g_pphase) return;
+    if (!g_prec) { HANDLE hp = GetProcessHeap(); g_prec = HeapAlloc(hp, 0, PREC_N * sizeof(PREC)); g_pidx = HeapAlloc(hp, 0, PIDX_N * 4); g_pvtx = HeapAlloc(hp, 0, PVTX_N); g_pcon = HeapAlloc(hp, 0, PCON_N * sizeof *g_pcon);
+        if (!g_prec || !g_pidx || !g_pvtx || !g_pcon) { g_prec = 0; return; } }
+    if (g_nprec >= PREC_N) return;
+    if (indexed ? g_npidx + n > PIDX_N : g_npvtx + n * 256 > PVTX_N) return;
+    if (g_npcon == 0 || g_pcon_gen != g_vcgen) { if (g_npcon >= PCON_N) return; cpy(g_pcon[g_npcon], g_vc, sizeof g_vc); g_npcon++; g_pcon_gen = g_vcgen; }
+    PREC *r = &g_prec[g_nprec++]; r->p = g_curp; r->key = g_curp->key; r->mode = mode; r->n = n; r->cidx = g_npcon - 1;
+    r->vp[0] = g_curp->vp[0]; r->vp[1] = g_curp->vp[1]; r->vp[2] = g_curp->vp[2]; r->vp[3] = g_curp->vp[3];
+    if (indexed) { r->imm = 0; r->ioff = g_npidx; cpy(g_pidx + g_npidx, g_idxb, n * 4); g_npidx += n; cpy(r->a, g_va, sizeof g_va); }
+    else { r->imm = 1; r->voff = g_npvtx; cpy(g_pvtx + g_npvtx, imm, n * 256); g_npvtx += n * 256; } }
+static void probe_replay(void) {   /* at the flip: every recorded draw into the probe, one render-target switch */
+    if (!g_nprec) return;
+    if (!g_pibo) { glGenBuffers(1, &g_pibo); glGenBuffers(1, &g_pvbo); }
     glBindFramebuffer(0x8D40, g_pfbo); glViewport(0, 0, 16, 16);
-    glDisable(0x0C11); glDisable(0x0B90); glDisable(0x0B44); glEnable(0x0B71); glDepthFunc(0x0201 /* LESS */); glDepthMask(1); glColorMask(0, 0, 0, 0);
-    glUniform4fv(u_pr, 4, g_pm); glUniform4f(u_pon, 1, 0, 0, 0);
-    if (indexed) glDrawElements(mode - 1, n, 0x1405, 0); else glDrawArrays(mode - 1, 0, n);
-    glUniform4f(u_pon, 0, 0, 0, 0); g_pdrawn = 1;
-    {   /* back to the game's own target and state (as apply_state sets them from the registers) */
-        u32 gs = g_cur_fb->gs ? g_cur_fb->gs : 1; glBindFramebuffer(0x8D40, g_cur_fb->fbo); glViewport(0, 0, g_cur_fb->w * gs, g_cur_fb->h * gs);
-        u32 hz = K(0x200), vt = K(0x204); glEnable(0x0C11); glScissor((hz & 0xFFFF) * gs, (vt & 0xFFFF) * gs, (hz >> 16) * gs, (vt >> 16) * gs);
-        glDepthFunc(K(0x354)); glDepthMask(1);
-        u32 cm = K(0x358); glColorMask((cm >> 16) & 1, (cm >> 8) & 1, cm & 1, (cm >> 24) & 1);
-        if (K(0x32C)) { glEnable(0x0B90); glStencilFunc(K(0x364), K(0x368) & 0xFF, K(0x36C) & 0xFF); glStencilOp(K(0x370), K(0x374), K(0x378)); glStencilMask(K(0x360) & 0xFF); }
-        if (K(0x308)) { glEnable(0x0B44); glCullFace(K(0x39C)); glFrontFace(K(0x3A0) == 0x900 ? 0x0901 : 0x0900); } } }
+    glDisable(0x0C11); glDisable(0x0B90); glDisable(0x0B44); glDisable(0x0BE2); glEnable(0x0B71); glDepthFunc(0x0201 /* LESS */); glDepthMask(1); glColorMask(0, 0, 0, 0);
+    glBindVertexArray(g_vao2);
+    if (g_npidx) { glBindBuffer(0x8893, g_pibo); glBufferData(0x8893, g_npidx * 4, g_pidx, 0x88E0); }
+    if (g_npvtx) { glBindBuffer(0x8892, g_pvbo); glBufferData(0x8892, g_npvtx, g_pvtx, 0x88E0); }
+    PROG *lastp = 0; u32 lastc = 0xFFFFFFFF; static PROG *touched[2048]; u32 ntouch = 0;
+    for (u32 k = 0; k < g_nprec; k++) {
+        PREC *r = &g_prec[k]; if (!r->p->id || r->p->key != r->key) continue;   /* the program was replaced since */
+        if (r->p != lastp) { g_curp = 0; prog_use(r->p); lastp = r->p; lastc = 0xFFFFFFFF; if (!r->p->ptouch && ntouch < 2048) touched[ntouch++] = r->p; r->p->ptouch = 1;
+            glUniform4fv(u_pr, 4, g_pm); glUniform4f(u_pon, 1, 0, 0, 0); }
+        glUniform4fv(u_vp, 1, r->vp);
+        if (r->cidx != lastc) { glUniform4fv(u_c, 192, &g_pcon[r->cidx][0][0]); lastc = r->cidx; }
+        if (r->imm) { glBindBuffer(0x8892, g_pvbo); for (u32 i = 0; i < 16; i++) { glEnableVertexAttribArray(i); glVertexAttribPointer(i, 4, 0x1406, 0, 256, (void *)(r->voff + i * 16)); }
+            glDrawArrays(r->mode - 1, 0, r->n); }
+        else { for (u32 i = 0; i < 16; i++) { PVA *a = &r->a[i];
+                if (a->on) { glBindBuffer(0x8892, a->buf); glEnableVertexAttribArray(i); glVertexAttribPointer(i, a->size, a->type, a->norm, a->stride, (void *)a->off); }
+                else { glDisableVertexAttribArray(i); glVertexAttrib4fv(i, a->c); } }
+            glBindBuffer(0x8893, g_pibo); glDrawElements(r->mode - 1, r->n, 0x1405, (void *)(r->ioff * 4)); } }
+    for (u32 i = 0; i < ntouch; i++) { PROG *q = touched[i]; q->ptouch = 0; g_curp = 0; prog_use(q); glUniform4f(u_pon, 0, 0, 0, 0); q->ustate = 0; q->cgen = 0; }
+    g_curp = 0; glBindVertexArray(g_vao); glColorMask(1, 1, 1, 1);
+    g_nprec = 0; g_npidx = 0; g_npvtx = 0; g_npcon = 0; g_pdrawn = 1;
+    g_state_ok = 0; state_cache_reset(); }
 static void probe_flip(void) {
-    {   static u32 tl, off; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; off = GetFileAttributesA("nocamcollide.txt") != 0xFFFFFFFF; }
+    {   static u32 tl, off; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; off = GetFileAttributesA("nocamcollide.txt") != 0xFFFFFFFF;
+            u32 v = 1; HANDLE fh = CreateFileA("probeevery.txt", 0x80000000, 1, 0, 3, 0x80, 0); if (fh != (HANDLE)-1) { char b[8] = {0}; DWORD nr = 0; ReadFile(fh, b, 7, &nr, 0); CloseHandle(fh); u32 x = 0; int any = 0; for (DWORD k = 0; k < nr; k++) if (b[k] >= 0x30 && b[k] <= 0x39) { x = x * 10 + b[k] - 0x30; any = 1; } if (any && x >= 1 && x <= 8) v = x; }
+            if (v != g_pN) { g_pN = v; g_pphase = 0; } }
         u32 s = g_r->pad[60]; if (!(s & 1) && s != g_pseq) { g_pseq = s; for (int k = 0; k < 16; k++) g_pm[k] = *(f32 *)&g_r->pad[64 + k]; g_pnf[0] = *(f32 *)&g_r->pad[62]; g_pnf[1] = *(f32 *)&g_r->pad[63]; }
         g_pon = !off && g_r->pad[61] && g_pseq; }
     if (!g_pon && !g_pfbo) return;
@@ -1057,7 +1226,9 @@ static void probe_flip(void) {
         glGenFramebuffers(1, &g_pfbo); glBindFramebuffer(0x8D40, g_pfbo); glFramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, g_ptex[0], 0); glFramebufferTexture2D(0x8D40, 0x8D00 /* DEPTH */, 0x0DE1, g_ptex[1], 0);
         glGenBuffers(2, g_ppbo); for (int k = 0; k < 2; k++) { glBindBuffer(0x88EB, g_ppbo[k]); glBufferData(0x88EB, 16 * 16 * 4, 0, 0x88E1); } glBindBuffer(0x88EB, 0);
         g_pdrawn = 1; }   /* (cleared below) */
-    if (g_pdrawn) {   /* this frame's probe -> a pixel-pack buffer; last frame's -> the nearest distance */
+    if (g_pon && g_pfbo) probe_replay(); else { g_nprec = 0; g_npidx = 0; g_npvtx = 0; g_npcon = 0; }
+    {   u32 ph = g_pphase; g_pphase = (g_pphase + 1) % g_pN; if (ph != g_pN - 1) return; }   /* mid-cycle: the probe's depth keeps accumulating */
+    if (g_pdrawn) {   /* this cycle's probe -> a pixel-pack buffer; last cycle's -> the nearest distance */
         glBindFramebuffer(0x8CA8, g_pfbo); glBindBuffer(0x88EB, g_ppbo[g_ppi]); glReadPixels(0, 0, 16, 16, 0x1902, 0x1406, 0);
         g_ppend[g_ppi] = 1; g_pnf_at[g_ppi][0] = g_pnf[0]; g_pnf_at[g_ppi][1] = g_pnf[1];
         u32 o = g_ppi ^ 1;
@@ -1072,9 +1243,10 @@ static void probe_flip(void) {
 static void do_draw_idx(u32 mode, u32 n, u32 mn, u32 mx, f32 *inl, u32 *idx) {
     zcount_draw(mode, n);
     PROG *p; if (mode < 1 || mode > 10 || mx < mn || mx - mn >= 262144) { g_r->pad[0]++; return; }
-    if (!vsh_setup(&p)) { g_r->pad[1]++; return; }
+    { PT0 int ok_ = vsh_setup(&p); PT1(12) if (!ok_) { g_r->pad[1]++; return; } }
     if (g_skip_draw) return;
     u32 nv = mx - mn + 1; if (g_cur_fb) g_cur_fb->gpu_frame = GetTickCount();
+    PMS
     hud_uniform(1.0f, 0.0f);   /* Milestone 96: indexed draws are 3D: no HUD squeeze (the uniform may hold a 2D draw's) */
     if (razor_draw(mode, n, nv, mn, mx, inl)) return;
     {   /* Milestone 95: meshlog.txt -> mesh_log.txt (each distinct mesh: vertex address, indices, vertices, texture, draws, over 10 s);
@@ -1110,6 +1282,7 @@ static void do_draw_idx(u32 mode, u32 n, u32 mn, u32 mx, f32 *inl, u32 *idx) {
                 if (k == ns) { seen[ns++] = key; u32 vals[11] = {2000 + mode, nv, (u32)x0, (u32)y0, (u32)x1, (u32)y1, toff, g_cur_fb ? g_cur_fb->w : 0, g_frame, ao, g_vstart}; char tx[220]; u32 q = 0;
                     for (int z = 0; z < 11; z++) { u32 vv = vals[z]; char d[12]; int zz = 0; do d[zz++] = (char)(0x30 + vv % 10); while (vv /= 10); while (zz) tx[q++] = d[--zz]; tx[q++] = 0x20; } tx[q++] = 0x0D; tx[q++] = 0x0A;
                     HANDLE fh = CreateFileA("hud_log.txt", 0x04, 1, 0, 4, 0x80, 0); if (fh != (HANDLE)-1) { DWORD w; WriteFile(fh, tx, q, &w, 0); CloseHandle(fh); } } } } }
+    PM(16)
     glBindVertexArray(g_vao2); glBindBuffer(0x8892, g_vbo2);
     /* attributes with arrays (Milestone 81): the raw Xbox bytes are uploaded and OpenGL reads the formats itself;
        ranges that overlap or lie close together (interleaved buffers) are uploaded once. CMP normals are converted. */
@@ -1124,11 +1297,14 @@ static void do_draw_idx(u32 mode, u32 n, u32 mn, u32 mx, f32 *inl, u32 *idx) {
         if (gi == ng) { glo[ng] = lo[i]; ghi[ng] = hi[i]; ng++; }
         grp[i] = gi;
     }
-    GLuint gbuf[16]; for (u32 gi = 0; gi < ng; gi++) gbuf[gi] = vbuf_get(glo[gi], ghi[gi]);
+    PM(22)
+    GLuint gbuf[16]; { PT0 for (u32 gi = 0; gi < ng; gi++) gbuf[gi] = vbuf_get(glo[gi], ghi[gi]); PT1(13) }
+    PMS
     /* CMP normals: converted into the streaming buffer */
     u32 cpos = 0, ncmp = 0; u8 *st = (u8 *)g_stage;
     for (u32 i = 0; i < 16; i++) { u32 f = K(0x1760 + i * 4); if (((f >> 4) & 0xF) && (f & 0xF) == 6) { if (cpos + nv * 16 > 16 * 262144 * 16) break; lo[i] = cpos; for (u32 v = 0; v < nv; v++) fetch(i, mn + v, (f32 *)(st + cpos + v * 16)); cpos += nv * 16; ncmp++; } }
     if (ncmp) { glBindBuffer(0x8892, g_vbo2); glBufferData(0x8892, cpos, st, 0x88E0); }
+    PM(17)
     for (u32 i = 0; i < 16; i++) {
         u32 f = K(0x1760 + i * 4), type = f & 0xF, size = (f >> 4) & 0xF, stride = (f >> 8) & 0xFF;
         if (size && type == 6) { glBindBuffer(0x8892, g_vbo2); glEnableVertexAttribArray(i); glVertexAttribPointer(i, 4, 0x1406, 0, 16, (void *)lo[i]); continue; }
@@ -1144,11 +1320,11 @@ static void do_draw_idx(u32 mode, u32 n, u32 mn, u32 mx, f32 *inl, u32 *idx) {
         case 2: glVertexAttribPointer(i, size, 0x1406, 0, stride, o); break;
         default: glDisableVertexAttribArray(i); glVertexAttrib4fv(i, inl + i * 4); break;
         }
-    }    for (u32 k = 0; k < n; k++) g_idxb[k] = idx[k] - mn;
+    }    PM(18) { PT0 for (u32 k = 0; k < n; k++) g_idxb[k] = idx[k] - mn;
     glBindBuffer(0x8893, g_ibo); glBufferData(0x8893, n * 4, g_idxb, 0x88E0);
-    glDrawElements(mode - 1, n, 0x1405 /* UNSIGNED_INT */, 0);
-    probe_draw(1, mode, n);   /* Milestone 102 */
-    glBindVertexArray(g_vao); g_r->draws++;
+    glDrawElements(mode - 1, n, 0x1405 /* UNSIGNED_INT */, 0); PT1(14) }
+    { PT0 probe_attrs(lo, glo, grp, gbuf, inl); probe_draw(1, mode, n, 0); PT1(15) }   /* Milestone 102 */
+    PMS glBindVertexArray(g_vao); g_r->draws++; PM(23)
 }
 static void hud_move(f32 *v, u32 n, u32 stride, u32 mode);
 static u32 g_hud_corner;   /* set by hud_move: this draw is the radar or the health bar */
@@ -1301,7 +1477,7 @@ static void do_draw_imm(u32 mode, u32 n, f32 *v) {
     glBindVertexArray(g_vao2); glBindBuffer(0x8892, g_vbo2); glBufferData(0x8892, n * 256, v, 0x88E0);
     for (u32 i = 0; i < 16; i++) { glEnableVertexAttribArray(i); glVertexAttribPointer(i, 4, 0x1406, 0, 256, (void *)(i * 16)); }
     glDrawArrays(mode - 1, 0, n);
-    probe_draw(0, mode, n);   /* Milestone 102 */
+    probe_draw(0, mode, n, v);   /* Milestone 102 */
     glBindVertexArray(g_vao); g_r->draws++;
 }
 /* Milestone 96: HUD layout. Screen-space draws (both 2D paths) lying wholly inside the radar's area or the health bars' area move
@@ -1331,6 +1507,7 @@ static void hud_move(f32 *v, u32 n, u32 stride, u32 mode) {
 static void do_draw(u32 mode, u32 n, u32 *v) {
     zcount_draw(mode, n);
     if (!g_state_ok || g_state_prog != &g_fixedp) { if (!apply_state(&g_fixedp)) return; g_state_ok = 1; g_state_prog = &g_fixedp; }
+    if (g_state_q && g_curp != g_state_q) prog_use(g_state_q);
     if (g_skip_draw) return;
     if (g_cur_fb) g_cur_fb->gpu_frame = GetTickCount();
     if (mode < 1 || mode > 10) return;
@@ -1450,7 +1627,16 @@ static void perf_csv(const u32 *v) {
     o = pf_num(o, v[10]); *o++ = ','; o = pf_str(o, ons[v[11] & 3]); *o++ = ','; o = pf_num(o, v[12]); *o++ = ',';
     o = pf_num(o, v[13]); *o++ = ','; o = pf_num(o, v[14]); *o++ = ','; o = pf_num(o, v[15]); *o++ = '\r'; *o++ = '\n';
     DWORD wr; WriteFile(g_pf_csv, t, (DWORD)(o - t), &wr, 0); }
+/* vsync (read every second, so it can be compared while playing): plain vsync by default - no tearing; a frame that misses a refresh
+   waits for the next one. adaptivevsync.txt = adaptive vsync (-1: a late frame is shown at once, which tears; it kept busy scenes
+   from halving to 30 fps before the speed fixes). novsyncpresent.txt = no vsync. A driver without adaptive vsync gets plain. */
+static s32 (GLAPI *g_swapint)(s32); static int g_vmode = -9;
+static void vsync_apply(int now) {
+    static u32 tl; u32 t = GetTickCount(); if (!now && t - tl < 1000) return; tl = t; if (!g_swapint) return;
+    int m = GetFileAttributesA("plainvsync.txt") != 0xFFFFFFFF ? 1 : GetFileAttributesA("adaptivevsync.txt") != 0xFFFFFFFF ? -1 : 0;   /* default 0: the compositor paces (bfview.c keeps the window composited) */
+    if (m == g_vmode) return; g_vmode = m; if (!g_swapint(m) && m == -1) g_swapint(1); }
 static void perf_present(void) {   /* after each SwapBuffers */
+    vsync_apply(0);
     long long t; if (!g_pf_qf) QueryPerformanceFrequency(&g_pf_qf); QueryPerformanceCounter(&t); if (!g_pf_t0) g_pf_t0 = t;
     if (g_perf_on < 0) g_perf_on = GetFileAttributesA("perf.txt") != 0xFFFFFFFF;
     if (g_perf_toggle) { g_perf_toggle = 0; g_perf_on = !g_perf_on; g_pf_seen = 0; }
@@ -1642,9 +1828,11 @@ static void do_flip(u32 addr) {
     {   /* every pixel count of this frame is written before the flip: one wait per frame, not one per report (counts arriving several
            frames late made objects flicker: the game hides and shows them by these counts). zlag.txt (read every second) = no wait at the flip. */
         static u32 tl, lag; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; lag = GetFileAttributesA("zlag.txt") != 0xFFFFFFFF; }
-        zq_poll(!lag); }
+        PMS zq_poll(!lag); PM(24) }
+    PMS
     probe_flip();   /* Milestone 102: the camera-collision probe of this frame */
     menu_flip();    /* Milestone 103: the menu options drawn this frame */
+    PM(19)
     if (!(addr & 0x03FFFFFF)) {   /* no display address yet (before AvSetDisplayMode): black, not memory at address 0 */
         glBindFramebuffer(0x8D40, 0); glDisable(0x0C11); glClearColor(0, 0, 0, 1); glClear(0x4000); SwapBuffers(g_dc); g_state_ok = 0; state_cache_reset(); return; }
     FB *f = fb_by_color(addr); g_r->pad[4]++;   /* diagnostics (Milestone 86): flips, memory presents, FBO presents, throttled, slowest present (us) */
@@ -1653,7 +1841,7 @@ static void do_flip(u32 addr) {
         static long long last_mem, qf; long long t; if (!qf) QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&t);
         if ((t - last_mem) * 1000 >= qf * 8) { last_mem = t; present_memory(addr); g_r->pad[5]++; } else g_r->pad[7]++; return; }
     g_r->pad[6]++;   /* at most every 8 ms (precise timer: GetTickCount steps 15.6 ms) */
-    glBindFramebuffer(0x8CA8, f->fbo); present_tex(f->col, f->w * f->gs, f->h * f->gs);   /* the GPU size: FXAA / sharpening steps one GPU pixel */   /* Milestone 96: 4:3 kept, FXAA; upside down as before (the Xbox's row 0 is at the top) */
+    PMS glBindFramebuffer(0x8CA8, f->fbo); present_tex(f->col, f->w * f->gs, f->h * f->gs); PM(20) PMS   /* the GPU size: FXAA / sharpening steps one GPU pixel */   /* Milestone 96: 4:3 kept, FXAA; upside down as before (the Xbox's row 0 is at the top) */
     {   /* Milestone 90: depth under the reticle (pixel pad[52], pad[53] of a 640x480 screen; default 320, 190), read through
            two pixel-pack buffers (one frame late, no stall) -> pad[50] (float bits, 0..1), pad[51] counts updates. The loader
            unprojects it to aim the player's shots at what the reticle covers. */
@@ -1663,6 +1851,7 @@ static void do_flip(u32 addr) {
             glBindFramebuffer(0x8CA8, f->fbo); glBindBuffer(0x88EB, pbo[pi]); glReadPixels(rx * f->w / 640 * f->gs + f->gs / 2, ry * f->h / 480 * f->gs + f->gs / 2, 1, 1, 0x1902 /* DEPTH_COMPONENT */, 0x1406, 0);   /* GPU pixel (Milestone 96) */
             if (primed) { f32 dv = 1; glBindBuffer(0x88EB, pbo[pi ^ 1]); glGetBufferSubData(0x88EB, 0, 4, &dv); g_r->pad[50] = *(u32 *)&dv; g_r->pad[51]++; }
             glBindBuffer(0x88EB, 0); pi ^= 1; primed = 1; } }
+    PM(21)
     {   /* brightness probe (lumaprobe.txt, Milestone 88): mean brightness of each presented frame (8x8 samples of the
            surface), 800 frames from 40 s, to luma_log.txt; flicker shows as jumps between consecutive frames */
         static u32 on = 2, n, t0; static u8 lg[800]; if (on == 2) on = GetFileAttributesA("lumaprobe.txt") != 0xFFFFFFFF;
@@ -1671,13 +1860,29 @@ static void do_flip(u32 addr) {
                 for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) { glReadPixels((x * 2 + 1) * f->w * f->gs / 16, (y * 2 + 1) * f->h * f->gs / 16, 1, 1, 0x1908, 0x1401, px); sum += px[0] + px[1] + px[2]; }
                 lg[n++] = (u8)(sum / (64 * 3));
                 if (n == 800) { HANDLE fh = CreateFileA("luma_log.txt", 0x40000000, 0, 0, 2, 0x80, 0); if (fh != (HANDLE)-1) { char tx[800 * 4]; u32 q = 0; for (u32 k = 0; k < 800; k++) { u32 v = lg[k]; tx[q++] = (char)(0x30 + v / 100); tx[q++] = (char)(0x30 + v / 10 % 10); tx[q++] = (char)(0x30 + v % 10); tx[q++] = 0x20; } DWORD w; WriteFile(fh, tx, q, &w, 0); CloseHandle(fh); } } } } }
-    SwapBuffers(g_dc); perf_present();
+    { PT0 SwapBuffers(g_dc); PT1(0) } perf_present();
     g_frame++; g_r->frames++; g_state_ok = 0; state_cache_reset();
     if (g_shot_req) { { u32 v[2] = {g_shot_n + 1, g_frame}; dcol_line(v, 2, "SHOT"); } static char nm[24]; u32 k = ++g_shot_n, q = 0; const char *s = "shot"; while (*s) nm[q++] = *s++; char d[10]; int z = 0; do d[z++] = (char)(0x30 + k % 10); while (k /= 10); while (z) nm[q++] = d[--z]; s = ".bmp"; while (*s) nm[q++] = *s++; nm[q] = 0; g_save_name = nm; g_shot_req = 0; save_frame(f); g_save_name = "frame.bmp"; }
     u32 t = GetTickCount(); if (t - g_last_save > 5000) { g_last_save = t; save_frame(f); }
 }
 
 /* processes ring commands for up to ~10 ms; returns 1 if it did anything */
+/* viewer profile (while the performance panel is shown): time spent on each kind of command, every 5 s a line in perf_profile.txt
+   (ms per second, count per second and KB per second of each command type; the rest = waiting and presenting) */
+static void prof_report(void) {
+    static long long t0; long long t; QueryPerformanceCounter(&t); if (!t0) t0 = t; if (!g_pf_qf) return;
+    long long el = t - t0; if (el < g_pf_qf * 5) return; t0 = t;
+    if (g_perf_on > 0) {
+        static const char *const nm[28] = {"(of flip: swap)", "wrap", "state", "draw", "clear", "flip", "fence", "vsh", "const", "draw_idx", "draw_imm", "zpass", "  [idx: setup", "vbuf", "upload+draw", "probe]", "[idx2: debug/hud", "cmp normals", "attribs]", "[flip: probe+menu", "present", "depth read]", "[idx3: vao+groups", "end vao]", "[flip start: wait for pixel counts]", "", "", ""};
+        char b[1600], *o = b; o = pf_str(o, "ms/s:"); long long tot = 0;
+        for (u32 i = 0; i < 25; i++) if (g_pr_n[i]) { if (i && i < 12) tot += g_pr_t[i]; *o++ = ' '; o = pf_str(o, nm[i]); *o++ = '='; o = pf_num(o, (u32)(g_pr_t[i] * 1000 / el));
+            *o++ = '/'; o = pf_num(o, (u32)((long long)g_pr_n[i] * g_pf_qf / el)); *o++ = 'x'; *o++ = '/'; o = pf_num(o, (u32)((long long)g_pr_w[i] * 4 * g_pf_qf / el / 1024)); o = pf_str(o, "KB"); }
+        o = pf_str(o, "  commands total "); o = pf_num(o, (u32)(tot * 1000 / el)); o = pf_str(o, " ms/s");
+        o = pf_str(o, "  | GPU ms/s:"); { unsigned long long gt = 0; for (u32 i = 1; i < 12; i++) if (g_gpu_ns[i]) { gt += g_gpu_ns[i]; *o++ = 0x20; o = pf_str(o, nm[i]); *o++ = 0x3D; o = pf_num(o, (u32)(g_gpu_ns[i] * g_pf_qf / el / 1000000)); }
+            o = pf_str(o, " total "); o = pf_num(o, (u32)(gt * g_pf_qf / el / 1000000)); } o = pf_str(o, "  spec programs "); o = pf_num(o, g_spec_built); o = pf_str(o, " failed "); o = pf_num(o, g_spec_fail); o = pf_str(o, g_spec > 0 ? " (on)" : " (off)"); o = pf_str(o, "\r\n");
+        HANDLE fh = CreateFileA("perf_profile.txt", 0x4, 1, 0, 4, 0x80, 0); if (fh != (HANDLE)-1) { DWORD wr; WriteFile(fh, b, (DWORD)(o - b), &wr, 0); CloseHandle(fh); } }
+    for (u32 i = 0; i < 16; i++) g_gpu_ns[i] = 0;
+    for (u32 i = 0; i < 28; i++) { g_pr_t[i] = 0; g_pr_n[i] = 0; g_pr_w[i] = 0; } }
 int gl_pump(void) {
     if (!g_r || !g_r->gl_ok) return 0;
     if (g_zrh != g_zrt) { static u32 fl; if (g_r->rpos == g_r->wpos && fl != g_zrt) { fl = g_zrt; glFlush(); } zq_poll(0); }   /* pixel counts the GPU has finished (the game may be waiting for one) */
@@ -1686,9 +1891,12 @@ int gl_pump(void) {
         u32 p = g_r->rpos, h = g_rb[p], type = h >> 24, len = h & 0xFFFFFF;
         if (type == CMD_WRAP) { g_r->rpos = 0; continue; }
         if (!len) { info(" bad command"); g_r->gl_ok = 0; return 0; }
-        u32 *a = &g_rb[p + 1];
+        u32 *a = &g_rb[p + 1]; long long pq0; QueryPerformanceCounter(&pq0);
+        int gq = -1; if (g_perf_on > 0 && type < 12 && type != CMD_FLIP && type != CMD_ZPASS && (++g_gq_cnt[type] & 7) == 0 && g_gq_head - g_gq_tail < GQN) {
+            u32 k = g_gq_head % GQN; if (!g_gq[k]) glGenQueries(1, &g_gq[k]); g_gq_type[k] = (u8)type; glBeginQuery(0x88BF /* TIME_ELAPSED */, g_gq[k]); gq = (int)k; g_gq_head++; }
         switch (type) {
         case CMD_STATE: cpy(g_kel, a, 0x2000); g_state_ok = 0; break;
+        case CMD_STATE_DELTA: for (u32 q = 0; q + 2 <= len - 1; q += 2) { u32 ix = a[q]; if (ix < 0x800) g_kel[ix] = a[q + 1]; } g_state_ok = 0; break;
         case CMD_DRAW: do_draw(a[0], a[1], a + 2); break;
         case CMD_CLEAR: do_clear(a[0]); break;
         case CMD_FLIP: do_flip(a[0]); break;
@@ -1699,8 +1907,13 @@ int gl_pump(void) {
         case CMD_DRAW_IMM: do_draw_imm(a[0], a[1], (f32 *)(a + 2)); break;
         case CMD_ZPASS: do_zpass(a[0], a[1]); break;
         }
+        if (gq >= 0) glEndQuery(0x88BF);
+        { long long pq1; QueryPerformanceCounter(&pq1); if (type < 12) { g_pr_t[type] += pq1 - pq0; g_pr_n[type]++; g_pr_w[type] += len; } }
         __sync_synchronize(); g_r->rpos = p + len; did = 1;
     }
+    while (g_gq_tail != g_gq_head) { u32 k = g_gq_tail % GQN; GLuint av = 0; glGetQueryObjectuiv(g_gq[k], 0x8867 /* RESULT_AVAILABLE */, &av); if (!av) break;
+        GLuint ns = 0; glGetQueryObjectuiv(g_gq[k], 0x8866 /* RESULT */, &ns); g_gpu_ns[g_gq_type[k]] += (unsigned long long)ns * 8; g_gq_tail++; }
+    prof_report();
     return did;
 }
 
@@ -1724,7 +1937,7 @@ int gl_init(void *wnd) {
     LOAD(glDeleteBuffers) LOAD(glGetBufferSubData) LOAD(glGenBuffers) LOAD(glBindBuffer) LOAD(glBufferData) LOAD(glGenFramebuffers) LOAD(glBindFramebuffer) LOAD(glFramebufferTexture2D) LOAD(glFramebufferRenderbuffer)
     LOAD(glGenRenderbuffers) LOAD(glBindRenderbuffer) LOAD(glRenderbufferStorage) LOAD(glCheckFramebufferStatus) LOAD(glBlitFramebuffer) LOAD(glCreateShader) LOAD(glShaderSource)
     LOAD(glCompileShader) LOAD(glGetShaderiv) LOAD(glGetShaderInfoLog) LOAD(glCreateProgram) LOAD(glAttachShader) LOAD(glLinkProgram) LOAD(glGetProgramiv) LOAD(glGetProgramInfoLog)
-    LOAD(glUseProgram) LOAD(glGetUniformLocation) LOAD(glUniform1i) LOAD(glUniform4fv) LOAD(glUniform4iv) LOAD(glUniform2iv) LOAD(glUniform4f) LOAD(glVertexAttribPointer)
+    LOAD(glUseProgram) LOAD(glDeleteProgram) LOAD(glGetUniformLocation) LOAD(glUniform1i) LOAD(glUniform4fv) LOAD(glUniform4iv) LOAD(glUniform2iv) LOAD(glUniform4f) LOAD(glVertexAttribPointer)
     LOAD(glEnableVertexAttribArray) LOAD(glBindAttribLocation) LOAD(glBlendEquation) LOAD(glBlendColor) LOAD(glActiveTexture) LOAD(glGenVertexArrays) LOAD(glBindVertexArray) LOAD(glBindFragDataLocation) LOAD(glGenerateMipmap) LOAD(glGenQueries) LOAD(glBeginQuery) LOAD(glEndQuery) LOAD(glGetQueryObjectuiv)
     GLuint vs = compile(0x8B31, g_vs), fs = compile(0x8B30, g_fs);
     if (!vs || !fs) { g_r->gl_failed = 1; return 0; }
@@ -1735,7 +1948,7 @@ int gl_init(void *wnd) {
     glLinkProgram(g_prog);
     GLint ok = 0; glGetProgramiv(g_prog, 0x8B82, &ok);
     if (!ok) { char log[200]; GLsizei n = 0; glGetProgramInfoLog(g_prog, 199, &n, log); log[n < 199 ? n : 199] = 0; info(" link: "); info(log); g_r->gl_failed = 1; return 0; }
-    g_fsobj = fs; g_fixedp.id = g_prog; prog_locs(&g_fixedp); g_curp = 0;
+    g_fsobj = fs; g_fixedp.id = g_prog; g_fixedp.vs = vs; prog_locs(&g_fixedp); g_curp = 0; spec_init();
     LOAD(glVertexAttrib4fv) LOAD(glDisableVertexAttribArray)
     g_stage = HeapAlloc(GetProcessHeap(), 0, 16 * 262144 * 16); g_idxb = HeapAlloc(GetProcessHeap(), 0, (1u << 20) * 4);
     if (!g_stage || !g_idxb) { info("out of memory"); g_r->gl_failed = 1; return 0; }
@@ -1745,7 +1958,7 @@ int gl_init(void *wnd) {
     static const u32 offs[7] = {0, 4, 8, 13, 17, 21, 25};   /* words: pos, D0, D1, (fog), T0..T3 */
     for (u32 i = 0; i < 7; i++) { glEnableVertexAttribArray(i); glVertexAttribPointer(i, 4, 0x1406, 0, VTX_WORDS * 4, (void *)(offs[i] * 4)); }
     glEnableVertexAttribArray(7); glVertexAttribPointer(7, 1, 0x1406, 0, VTX_WORDS * 4, (void *)(12 * 4));   /* fog */
-    { s32 (GLAPI *swapint)(s32) = glp("wglSwapIntervalEXT"); if (swapint) swapint(GetFileAttributesA("novsyncpresent.txt") != 0xFFFFFFFF ? 0 : 1); }   /* Milestone 87: vsync on (no tearing on fast turns); novsyncpresent.txt turns it off */
+    g_swapint = glp("wglSwapIntervalEXT"); vsync_apply(1);   /* Milestone 87: vsync on (no tearing); see vsync_apply */
     const u8 *ren = glGetString(0x1F01); if (ren) info((const char *)ren);
     __sync_synchronize(); g_r->gl_ok = 1;
     return 1;

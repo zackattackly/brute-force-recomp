@@ -142,6 +142,19 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   drawn top-left in present_tex), log perf_log.csv (one line per second while shown). Loader numbers in RING pad[84..93] from gpu.c
   perf_sample (game flips/s, slowest flip, CPU via GetProcessTimes/GetSystemTimes, net_stats); relay ping = bflist.exe PING every 2 s ->
   "BFNP" report to net.c. Screen capture of the full-screen window comes out black; ask the user to look.
+- Performance (Nov 17): busy scenes were 27-37 fps. Causes found with the panel + perf_profile.txt (viewer ms/s per command type, GPU ms/s
+  from sampled GL_TIME_ELAPSED queries) and live switches: (1) the camera probe switched render targets twice per draw -> now recorded
+  during the frame and replayed in one batch at the flip (bfgl.c probe_draw/probe_replay; probeevery.txt = groups); (2) render.c sent
+  the full 8 KB register block before every draw (~370 MB/s) -> gpu.c tracks changed registers, render.c sends CMD_STATE_DELTA pairs
+  (fullstate.txt = old way); (3) plain vsync halved late frames to 30 -> adaptive vsync (-1; fullvsync.txt = plain). Now ~60 in busy
+  scenes. Left: waits on pixel counts (zq_poll; zlag.txt = one frame late, once flickered objects) and the reticle depth read.
+  Then: plain vsync again (tearing with adaptive; adaptivevsync.txt / novsyncpresent.txt, read every second); specialised pixel
+  shaders (bfgl.c spec_prog/fs_spec: per vertex program + combiner setup, stages written out with literal register numbers - const
+  arrays + loop were SLOWER; nospecfs.txt = the general g_fs; spec_fs_sample.txt = one generated source). GPU fill was the limit
+  (resscale.txt 1 test). With NVIDIA Control Panel triple buffering on for bfview.exe, busy scenes hold 60.
+  No driver setting needed now: the full-screen window is 1 px taller than the monitor (bfview.c set_full; exactfull.txt = exact),
+  which keeps Windows compositing it (an exact-size window got independent flip and tore), and the viewer presents without waiting
+  (swap interval 0); the compositor shows the newest frame each refresh = triple buffering on any card. plainvsync.txt = interval 1.
 - Milestone 101 (hit marker): hitmarker.wav (from the user's clip) plays when the player's shot hits a character. Hook on the
   bullet ray call 0x2309ED (0x230040, stdcall 6 args; result arg4: +0x34 = SHOOTER, +0x44 = object hit; a character when
   [[obj+0xC]+4] == 3; alive when health, a float at character +0x54, is above 0) and on the pass-through path 0x2309CB

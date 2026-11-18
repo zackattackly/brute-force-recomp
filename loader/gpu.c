@@ -35,6 +35,8 @@ u32 g_av_pitch = 1280, g_av_format = 0x11, g_av_fb;
 static u32 g_frames, g_draws, g_clears, g_methods, g_flips;
 u32 g_flips_total;   /* game flips, for the GPU path's present (kernel2.c vblank_tick) */
 u32 kel[0x2000 / 4];   /* shared with render.c */
+/* Performance: the registers changed since render.c last sent the state (it sends only those: CMD_STATE_DELTA) */
+u32 g_kdirty[64], g_kdlist[0x800], g_kdn;
 void render_method(u32 m, u32 v); void render_clear(u32 flags); void render_init(void); void render_flush(void);
 extern u32 g_r_tris, g_r_pix, g_r_ff, g_r_prims[16], g_r_us, g_r_verts; extern u64 g_vs_cyc; static u64 g_pb_cyc, g_tick_state[4]; extern u32 g_fl_par, g_fl_ser, g_fl_tris;
 static u32 g_sem_off, g_sem_val;   /* last value written to each method of the 3D object */
@@ -89,7 +91,7 @@ static void method(u32 sub, u32 m, u32 v) {
     g_hist_sub[sub]++;
     if (m >= 0x2000) return;
     g_hist[m / 4]++;
-    kel[m / 4] = v;
+    if (kel[m / 4] != v) { u32 i = m / 4; kel[i] = v; if (!(g_kdirty[i >> 5] & (1u << (i & 31)))) { g_kdirty[i >> 5] |= 1u << (i & 31); g_kdlist[g_kdn++] = i; } }
     switch (m) {
     case 0x0100: if (v) { REG(0x400704) = (sub << 16) | m; REG(0x400708) = v; REG(0x400108) = 1; REG(0x400100) |= 0x00100000; g_nop_wait = 1; g_nops++; } break;
     case 0x1D94: g_clears++; render_clear(v); break;                         /* CLEAR_SURFACE */

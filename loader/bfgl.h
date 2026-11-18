@@ -26,6 +26,7 @@ enum {
     CMD_DRAW_IDX,    /* u32 mode, count, min, max, 16 x 4 floats (attributes without arrays), then count u32 indices */
     CMD_DRAW_IMM,    /* u32 mode, count, then count x 16 x 4 floats (all attributes of each vertex) */
     CMD_ZPASS,       /* u32 op (0 clear, 1 enable = arg, 2 write the report to physical address arg), u32 arg (Milestone 87) */
+    CMD_STATE_DELTA, /* (register index, value) pairs: only the registers that changed since the last state (performance) */
 };
 #define VTX_WORDS 29     /* x y z w (Xbox window coordinates, clip w), D0 rgba, D1 rgba, fog, T0..T3 strq */
 

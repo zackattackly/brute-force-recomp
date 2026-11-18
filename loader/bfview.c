@@ -11,6 +11,7 @@ K32 void *WINAPI MapViewOfFile(HANDLE, DWORD, DWORD, DWORD, u32);
 K32 HANDLE WINAPI OpenProcess(DWORD, BOOL, DWORD);
 K32 DWORD WINAPI WaitForSingleObject(HANDLE, DWORD);
 K32 void WINAPI Sleep(DWORD);
+K32 DWORD WINAPI GetFileAttributesA(const char *);
 K32 DWORD WINAPI GetTickCount(void);
 K32 void WINAPI ExitProcess(u32);
 K32 void *WINAPI GetModuleHandleA(const char *);
@@ -75,7 +76,11 @@ static void set_full(int on) {
         struct { u32 size; s32 mon[4], work[4]; u32 flags; } mi = {sizeof mi};
         if (!GetMonitorInfoA(MonitorFromWindow(g_wnd, 2 /* nearest */), &mi)) return;
         SetWindowLongA(g_wnd, -16 /* GWL_STYLE */, (s32)0x90000000 /* WS_POPUP | WS_VISIBLE */);
-        SetWindowPos(g_wnd, 0, mi.mon[0], mi.mon[1], mi.mon[2] - mi.mon[0], mi.mon[3] - mi.mon[1], 0x0020 | 0x0040 /* FRAMECHANGED, SHOWWINDOW */);
+        /* one pixel taller than the monitor: Windows then keeps compositing the window (an exact full-screen window is handed straight to
+           the screen and tore without vsync); the compositor shows the newest finished frame at each refresh - triple buffering on any
+           graphics card (bfgl.c presents without waiting). exactfull.txt = exactly the monitor's size. */
+        s32 extra = GetFileAttributesA("exactfull.txt") != 0xFFFFFFFF ? 0 : 1;
+        SetWindowPos(g_wnd, 0, mi.mon[0], mi.mon[1], mi.mon[2] - mi.mon[0], mi.mon[3] - mi.mon[1] + extra, 0x0020 | 0x0040 /* FRAMECHANGED, SHOWWINDOW */);
     } else {
         SetWindowLongA(g_wnd, -16, 0x10CF0000 /* overlapped, visible */);
         s32 *r = g_wrect; if (r[2] - r[0] < 200) { r[0] = 200; r[1] = 100; r[2] = r[0] + 1296; r[3] = r[1] + 759; }
