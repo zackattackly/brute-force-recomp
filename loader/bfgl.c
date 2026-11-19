@@ -703,6 +703,16 @@ static PROG *spec_prog(PROG *P, const GLint *sv) {
     zero(&e->p, sizeof e->p); e->p.id = id; e->p.key = P->key ^ fk; e->p.vs = P->vs; e->base = P; e->vkey = P->key; e->fkey = fk; e->used = clock;
     prog_locs(&e->p); g_curp = 0; g_spec_built++;
     return &e->p; }
+static u32 g_state_ok;   /* (defined below) */
+static u32 g_dbg;   /* dbg.txt: letters switching drawing rules off (missing-terrain hunt) */
+static void dbg_poll(void) { static u32 tl; u32 t = GetTickCount(); if (t - tl < 1000) return; tl = t; u32 f = 0;
+    HANDLE h = CreateFileA("dbg.txt", 0x80000000, 1, 0, 3, 0x80, 0); if (h != (HANDLE)-1) { char b[32]; DWORD n = 0; ReadFile(h, b, 31, &n, 0); CloseHandle(h);
+        for (DWORD i = 0; i < n; i++) { char c = b[i] | 0x20; if (c >= 'a' && c <= 'z') f |= 1u << (c - 'a'); } }
+    if (f != g_dbg) { g_dbg = f; g_state_ok = 0; g_hs_rast = 0; } }
+#define DBG(c) (g_dbg & (1u << ((c) - 'a')))
+static void dbg_apply(void) { if (!g_dbg) return;
+    if (DBG('s')) glDisable(0x0B90); if (DBG('c')) glDisable(0x0B44); if (DBG('z')) glDisable(0x0B71); if (DBG('b')) glDisable(0x0BE2);
+    if (DBG('w')) glDepthMask(1); if (DBG('m')) glColorMask(1, 1, 1, 1); }
 static int apply_state(PROG *P) {
     {   /* depth buffers read as colour textures: convert before any of this draw's state is set */
         static u32 dc = 2; if (dc == 2) dc = GetFileAttributesA("nodepthcolor.txt") == 0xFFFFFFFF;
@@ -872,7 +882,7 @@ static int apply_state(PROG *P) {
     u32 hu = hs ^ (ht * 31) ^ hrange(0x260, 0x290) ^ (hrange(0xA60, 0xAE0) * 7) ^ (hrange(0x1E40, 0x1E64) * 13) ^ K(0x2A8) ^ (K(0x300) * 3) ^ (K(0x33C) * 5) ^ (K(0x340) * 11) ^ (K(0x29C) * 17) ^ (K(0x2A4) * 19) ^ (hrange(0x9C0, 0x9CC) * 23) ^ (g_ab * 0x9E3779B1u);
     f32 wk = (W * 3 == H * 4) ? g_wide_k : 0.0f;   /* Milestone 96: widescreen squeeze on every 4:3 target (the screen and the copies of it the effects draw at
                                                      320x240, 160x120, 80x60; squeezing only the screen doubled the depth-of-field image), not on square shadow maps */
-    hu ^= *(u32 *)&wk * 0x85EBCA6Bu;
+    hu ^= *(u32 *)&wk * 0x85EBCA6Bu; hu ^= g_dbg * 0x27D4EB2Fu;
     /* register combiners (computed first: the specialised program depends on them) */
     u32 ctl = K(0x1E60), ns = ctl & 0xFF; if (ns > 8) ns = 8; if (!ns) ns = 1;
     GLint sv[SV_N]; f32 f0[32], f1[32];
@@ -909,7 +919,7 @@ static int apply_state(PROG *P) {
     glUniform4iv(u_cdst, 8, cdst); glUniform4iv(u_adst, 8, adst); glUniform2iv(u_op, 8, op); glUniform4fv(u_f0, 8, f0); glUniform4fv(u_f1, 8, f1);
     f32 fog[4]; unpack4(K(0x2A8), fog); fog[3] = 1; glUniform4fv(u_fog, 1, fog);   /* fog not applied yet */
     glUniform4iv(u_fa, 1, fa); glUniform4iv(u_fb, 1, fbv); glUniform4iv(u_frep, 1, frep); glUniform4iv(u_finv, 1, finv);
-    GLint at[2] = {K(0x300) ? (GLint)(K(0x33C) & 7) : -1, (GLint)(K(0x340) & 0xFF)}; glUniform2iv(u_atest, 1, at);
+    GLint at[2] = {K(0x300) && !DBG('a') ? (GLint)(K(0x33C) & 7) : -1, (GLint)(K(0x340) & 0xFF)}; glUniform2iv(u_atest, 1, at);
     {   /* fog (Milestone 82): 0x29C mode, 0x2A4 enable, 0x9C0 parameters */
         u32 fm = K(0x29C); f32 mode = fm == 0x2601 ? 0 : fm == 0x800 ? 1 : fm == 0x804 ? 2 : fm == 0x802 ? 3 : fm == 0x801 || fm == 0x803 ? 4 : 0;
         glUniform4f(u_fogp, fl(K(0x9C0)), fl(K(0x9C4)), fl(K(0x9C8)), mode); glUniform1i(u_fogon, K(0x2A4) && g_ab != 2 ? 1 : 0); }
@@ -1030,11 +1040,20 @@ static GLuint g_gq[GQN]; static u8 g_gq_type[GQN]; static u32 g_gq_head, g_gq_ta
 static f32 *g_stage; static u32 *g_idxb;
 /* vertex data cache (Milestone 81): one GL buffer per Xbox memory range, re-uploaded only when its contents change
    (fingerprint: 128 sampled words and both ends) */
-typedef struct { u32 lo, hi, hash, used, checked; GLuint buf; } VCACHE;
+typedef struct { u32 lo, hi, hash, used, checked, stable; GLuint buf; } VCACHE;
 static u32 g_draw_seq;   /* bumped at every flip: a range is re-hashed once per game frame */
 #define NVC 1024
 static VCACHE g_vcache[NVC];
-static u32 vhash(u32 lo, u32 hi) {   /* Milestone 87: the whole range (a 128-word sample missed terrain rewrites: holes, floating slabs) */
+static int g_hashall;   /* hashall.txt (at start): check every range every frame, as before */
+static u32 vhash_old(u32 lo, u32 hi);
+static u32 vhash(u32 lo, u32 hi) {   /* performance: 2 x 64-bit lanes, rotate + add (the full map's terrain is hashed every frame) */
+    static int old = -1; if (old < 0) { old = GetFileAttributesA("oldhash.txt") != 0xFFFFFFFF; g_hashall = GetFileAttributesA("hashall.txt") != 0xFFFFFFFF; } if (old) return vhash_old(lo, hi);
+    u32 n = (hi - lo) / 8; const unsigned long long *p = (const unsigned long long *)PHYS(lo); unsigned long long a = 0x9E3779B97F4A7C15ull, b = 0xC2B2AE3D27D4EB4Full; u32 i = 0;
+    for (; i + 2 <= n; i += 2) { a = ((a << 7) | (a >> 57)) + (p[i] ^ b); b = ((b << 11) | (b >> 53)) + (p[i + 1] ^ a); }
+    for (; i < n; i++) a = ((a << 7) | (a >> 57)) + p[i];
+    const u8 *t = (const u8 *)PHYS(lo) + n * 8; for (u32 k = n * 8; k < hi - lo; k++) a = a * 31 + *t++;
+    unsigned long long h = a ^ (b * 3) ^ n; return (u32)h ^ (u32)(h >> 32); }
+static u32 vhash_old(u32 lo, u32 hi) {   /* Milestone 87: the whole range (a 128-word sample missed terrain rewrites: holes, floating slabs) */
     u32 n = (hi - lo) / 4; const u32 *p = (const u32 *)PHYS(lo); u32 a = 2166136261u, b = 0x9E3779B9u, c = 0x85EBCA6Bu, d = 0xC2B2AE35u, i = 0;
     for (; i + 4 <= n; i += 4) { a = (a ^ p[i]) * 16777619u; b = (b ^ p[i + 1]) * 2246822519u; c = (c ^ p[i + 2]) * 3266489917u; d = (d ^ p[i + 3]) * 668265263u; }
     for (; i < n; i++) a = (a ^ p[i]) * 16777619u;
@@ -1045,26 +1064,75 @@ static GLuint vbuf_get(u32 lo, u32 hi) {
     VCACHE *e = 0, *old = &g_vcache[0];
     for (u32 i = 0; i < NVC; i++) { VCACHE *c = &g_vcache[i]; if (c->buf && c->lo == lo && c->hi == hi) { e = c; break; } if (!c->buf) { if (!old->buf || 1) { old = c; break; } } if (c->used < old->used) old = c; }
     if (e && e->used == g_frame && e->checked == g_draw_seq) return e->buf;   /* already checked since the last game flip */
+    /* performance: data unchanged for 30 checks is checked every 8th frame (staggered by address); a change brings it back to every frame */
+    if (e && e->stable >= 30 && ((g_draw_seq + (lo >> 8)) & 7) && !g_hashall) { e->used = g_frame; e->checked = g_draw_seq; return e->buf; }
     u32 h = vhash(lo, hi);
-    if (e && e->hash == h) { e->used = g_frame; e->checked = g_draw_seq; return e->buf; }
+    if (e && e->hash == h) { e->used = g_frame; e->checked = g_draw_seq; if (e->stable < 1000) e->stable++; return e->buf; }
     if (!e) { e = old; if (!e->buf) glGenBuffers(1, &e->buf); e->lo = lo; e->hi = hi; }
-    e->hash = h; e->used = g_frame; e->checked = g_draw_seq;
+    e->hash = h; e->used = g_frame; e->checked = g_draw_seq; e->stable = 0;
     glBindBuffer(0x8892, e->buf); glBufferData(0x8892, hi - lo, PHYS(lo), 0x88E4 /* STATIC_DRAW */);
     return e->buf;
 }
+static void fetch(u32 i, u32 idx, f32 *c);
+typedef struct { u32 src, end, stride, nv, hash, used, checked, stable; GLuint buf; } NCACHE;
+#define NCC 512
+static NCACHE g_ncache[NCC];
+static GLuint cmp_get(u32 attr, u32 src, u32 end, u32 stride, u32 nv, u32 mn) {
+    NCACHE *e = 0, *old = &g_ncache[0];
+    for (u32 k = 0; k < NCC; k++) { NCACHE *c = &g_ncache[k]; if (c->buf && c->src == src && c->end == end && c->stride == stride && c->nv == nv) { e = c; break; }
+        if (!c->buf) { old = c; break; } if (c->used < old->used) old = c; }
+    if (e && e->used == g_frame && e->checked == g_draw_seq) return e->buf;
+    if (e && e->stable >= 30 && ((g_draw_seq + (src >> 8)) & 7) && !g_hashall) { e->used = g_frame; e->checked = g_draw_seq; return e->buf; }
+    u32 h = vhash(src & ~3u, (end + 3) & ~3u);
+    if (e && e->hash == h) { e->used = g_frame; e->checked = g_draw_seq; if (e->stable < 1000) e->stable++; return e->buf; }
+    if (!e) { e = old; if (!e->buf) glGenBuffers(1, &e->buf); e->src = src; e->end = end; e->stride = stride; e->nv = nv; }
+    e->hash = h; e->used = g_frame; e->checked = g_draw_seq; e->stable = 0;
+    f32 *t = g_stage; if (nv > 262144) nv = 262144; for (u32 v = 0; v < nv; v++) fetch(attr, mn + v, t + v * 4);
+    glBindBuffer(0x8892, e->buf); glBufferData(0x8892, nv * 16, t, 0x88E4 /* STATIC_DRAW */);
+    return e->buf; }
 GL_FN(void, glVertexAttrib4fv, (GLuint, const GLfloat *)) GL_FN(void, glDisableVertexAttribArray, (GLuint))
 IMP void GLAPI glDrawElements(GLenum, GLsizei, GLenum, const void *);
 static PROG *g_state_prog;
 static u32 g_state_ok;
 static int vsh_setup(PROG **pp) {
     PROG *p = vsh_program(); if (!p) return 0;
-    if (!g_state_ok || g_state_prog != p) { if (!apply_state(p)) return 0; g_state_ok = 1; g_state_prog = p; }
+    dbg_poll(); if (!g_state_ok || g_state_prog != p) { if (!apply_state(p)) return 0; g_state_ok = 1; g_state_prog = p; } dbg_apply();
     if (g_state_q) { p = g_state_q; if (g_curp != p) prog_use(p); }   /* the specialised program apply_state chose */
     if (p->cgen != g_vcgen) { glUniform4fv(u_c, 192, &g_vc[0][0]); p->cgen = g_vcgen; }   /* only when they changed (Milestone 81) */
     *pp = p; return 1;
 }
 static int g_zon, g_zrun;
 static u32 g_zdraws, g_zverts, g_zdep, g_zfunc, g_zcmask, g_zw, g_zh, g_zprim;   /* what was drawn while counting (report probe) */
+/* frame capture (capframe.txt): every draw of the next frame -> frame_capture.txt: number, kind (I indexed, M immediate, F fixed),
+   primitive, indices/vertices, vertex range size, vertex address, attribute 0 format, texture 0 address, vertex program start,
+   colour mask, depth test/func, target size, any pixel passed (ANY_SAMPLES_PASSED query around the draw). The missing-terrain hunt. */
+#define CAPN 4096
+IMP BOOL WINAPI DeleteFileA(const char *);
+static int g_cap; static u32 g_capn; static GLuint g_capq[CAPN]; static int g_capopen; static u32 (*g_caprow)[12]; static char g_capkind[CAPN];
+static void cap_poll(void) { static u32 tl; u32 t = GetTickCount(); if (t - tl < 500) return; tl = t;
+    if (!g_cap && GetFileAttributesA("capframe.txt") != 0xFFFFFFFF) { DeleteFileA("capframe.txt"); g_cap = 1; g_capn = 0; } }
+static void cap_draw(char kind, u32 mode, u32 n, u32 nv) {
+    if (g_cap != 2) return;
+    if (g_capopen) { glEndQuery(0x8C2F); g_capopen = 0; }
+    if (g_capn >= CAPN) return;
+    if (!g_caprow) g_caprow = HeapAlloc(GetProcessHeap(), 0, CAPN * sizeof *g_caprow);
+    if (!g_caprow) return;
+    u32 i = g_capn++; if (!g_capq[i]) glGenQueries(1, &g_capq[i]);
+    u32 *r = g_caprow[i]; g_capkind[i] = kind;
+    r[0] = mode; r[1] = n; r[2] = nv; r[3] = K(0x1720) & 0x03FFFFFF; r[4] = K(0x1760); r[5] = K(0x1B00) & 0x03FFFFFF; r[6] = g_vstart;
+    r[7] = K(0x358); r[8] = K(0x30C) ? K(0x354) : 0; r[9] = g_cur_fb ? g_cur_fb->w * 10000 + g_cur_fb->h : 0; r[10] = g_frame;
+    glBeginQuery(0x8C2F /* ANY_SAMPLES_PASSED */, g_capq[i]); g_capopen = 1; }
+static void cap_flip(void) {
+    if (g_cap == 1) { g_cap = 2; g_capn = 0; return; }   /* start with the next frame */
+    if (g_cap != 2) return;
+    if (g_capopen) { glEndQuery(0x8C2F); g_capopen = 0; }
+    static char buf[CAPN * 110]; u32 q = 0;
+    for (u32 i = 0; i < g_capn; i++) { GLuint any = 0; glGetQueryObjectuiv(g_capq[i], 0x8866 /* RESULT (waits) */, &any);
+        buf[q++] = g_capkind[i]; buf[q++] = ' '; u32 vals[12]; for (int k = 0; k < 11; k++) vals[k] = g_caprow[i][k]; vals[11] = any;
+        for (int k = 0; k < 12; k++) { u32 v = vals[k]; char d[12]; int z = 0; do d[z++] = (char)('0' + v % 10); while (v /= 10); while (z) buf[q++] = d[--z]; buf[q++] = ' '; }
+        buf[q++] = 13; buf[q++] = 10; }
+    HANDLE fh = CreateFileA("frame_capture.txt", 0x40000000, 0, 0, 2, 0x80, 0); if (fh != (HANDLE)-1) { DWORD w; WriteFile(fh, buf, q, &w, 0); CloseHandle(fh); }
+    g_cap = 0; }
 static void zcount_draw(u32 mode, u32 n) { (void)0; if (g_zrun) { g_zdraws++; g_zverts += n; g_zdep = K(0x30C); g_zfunc = K(0x354); g_zcmask = K(0x358); g_zprim = mode; if (g_cur_fb) { g_zw = g_cur_fb->w; g_zh = g_cur_fb->h; } } }
 /* Milestone 95: the Razorback (razorback.stl, binary STL) drawn in place of the MK-ASLT's mesh (954 indices / 399 vertices;
    its small part 28 / 12 is hidden). The model is centred, its longest side laid along the barrel axis Z (1.0 m long like the
@@ -1186,8 +1254,10 @@ static void probe_draw(int indexed, u32 mode, u32 n, const f32 *imm) {
     r->vp[0] = g_curp->vp[0]; r->vp[1] = g_curp->vp[1]; r->vp[2] = g_curp->vp[2]; r->vp[3] = g_curp->vp[3];
     if (indexed) { r->imm = 0; r->ioff = g_npidx; cpy(g_pidx + g_npidx, g_idxb, n * 4); g_npidx += n; cpy(r->a, g_va, sizeof g_va); }
     else { r->imm = 1; r->voff = g_npvtx; cpy(g_pvtx + g_npvtx, imm, n * 256); g_npvtx += n * 256; } }
+static void zq_stop(void); static void zq_start(void);
 static void probe_replay(void) {   /* at the flip: every recorded draw into the probe, one render-target switch */
     if (!g_nprec) return;
+    int zr = g_zrun; if (zr) zq_stop();   /* not counted in the game's pixel counts (they decide what the game draws) */
     if (!g_pibo) { glGenBuffers(1, &g_pibo); glGenBuffers(1, &g_pvbo); }
     glBindFramebuffer(0x8D40, g_pfbo); glViewport(0, 0, 16, 16);
     glDisable(0x0C11); glDisable(0x0B90); glDisable(0x0B44); glDisable(0x0BE2); glEnable(0x0B71); glDepthFunc(0x0201 /* LESS */); glDepthMask(1); glColorMask(0, 0, 0, 0);
@@ -1210,7 +1280,7 @@ static void probe_replay(void) {   /* at the flip: every recorded draw into the 
     for (u32 i = 0; i < ntouch; i++) { PROG *q = touched[i]; q->ptouch = 0; g_curp = 0; prog_use(q); glUniform4f(u_pon, 0, 0, 0, 0); q->ustate = 0; q->cgen = 0; }
     g_curp = 0; glBindVertexArray(g_vao); glColorMask(1, 1, 1, 1);
     g_nprec = 0; g_npidx = 0; g_npvtx = 0; g_npcon = 0; g_pdrawn = 1;
-    g_state_ok = 0; state_cache_reset(); }
+    g_state_ok = 0; state_cache_reset(); if (zr) zq_start(); }
 static void probe_flip(void) {
     {   static u32 tl, off; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; off = GetFileAttributesA("nocamcollide.txt") != 0xFFFFFFFF;
             u32 v = 1; HANDLE fh = CreateFileA("probeevery.txt", 0x80000000, 1, 0, 3, 0x80, 0); if (fh != (HANDLE)-1) { char b[8] = {0}; DWORD nr = 0; ReadFile(fh, b, 7, &nr, 0); CloseHandle(fh); u32 x = 0; int any = 0; for (DWORD k = 0; k < nr; k++) if (b[k] >= 0x30 && b[k] <= 0x39) { x = x * 10 + b[k] - 0x30; any = 1; } if (any && x >= 1 && x <= 8) v = x; }
@@ -1241,7 +1311,7 @@ static void probe_flip(void) {
         glBindFramebuffer(0x8D40, g_pfbo); glDisable(0x0C11); glDepthMask(1); glClearDepth(1.0); glClear(0x0100); g_pdrawn = 0;
         g_state_ok = 0; state_cache_reset(); } }
 static void do_draw_idx(u32 mode, u32 n, u32 mn, u32 mx, f32 *inl, u32 *idx) {
-    zcount_draw(mode, n);
+    zcount_draw(mode, n); cap_draw('I', mode, n, mx - mn + 1);
     PROG *p; if (mode < 1 || mode > 10 || mx < mn || mx - mn >= 262144) { g_r->pad[0]++; return; }
     { PT0 int ok_ = vsh_setup(&p); PT1(12) if (!ok_) { g_r->pad[1]++; return; } }
     if (g_skip_draw) return;
@@ -1300,14 +1370,19 @@ static void do_draw_idx(u32 mode, u32 n, u32 mn, u32 mx, f32 *inl, u32 *idx) {
     PM(22)
     GLuint gbuf[16]; { PT0 for (u32 gi = 0; gi < ng; gi++) gbuf[gi] = vbuf_get(glo[gi], ghi[gi]); PT1(13) }
     PMS
-    /* CMP normals: converted into the streaming buffer */
-    u32 cpos = 0, ncmp = 0; u8 *st = (u8 *)g_stage;
-    for (u32 i = 0; i < 16; i++) { u32 f = K(0x1760 + i * 4); if (((f >> 4) & 0xF) && (f & 0xF) == 6) { if (cpos + nv * 16 > 16 * 262144 * 16) break; lo[i] = cpos; for (u32 v = 0; v < nv; v++) fetch(i, mn + v, (f32 *)(st + cpos + v * 16)); cpos += nv * 16; ncmp++; } }
-    if (ncmp) { glBindBuffer(0x8892, g_vbo2); glBufferData(0x8892, cpos, st, 0x88E0); }
+    /* CMP normals: unpacked into a GL buffer cached per source range (performance: re-unpacking every vertex of every draw cost
+       ~160 ms a second with the whole map drawn); the source is hashed once per game frame like the vertex cache. oldcmp.txt = old way */
+    GLuint cbuf[16]; u32 cpos = 0, ncmp = 0; u8 *st = (u8 *)g_stage;
+    {   static int oldc = -1; if (oldc < 0) oldc = GetFileAttributesA("oldcmp.txt") != 0xFFFFFFFF;
+        for (u32 i = 0; i < 16; i++) { u32 f = K(0x1760 + i * 4); if (!(((f >> 4) & 0xF) && (f & 0xF) == 6)) continue;
+            u32 stride = (f >> 8) & 0xFF, src = (K(0x1720 + i * 4) & 0x03FFFFFF) + mn * stride, end = src + (nv - 1) * stride + 4;
+            if (!oldc && stride && end <= 0x4000000) { cbuf[i] = cmp_get(i, src, end, stride, nv, mn); lo[i] = 0; ncmp++; continue; }
+            if (cpos + nv * 16 > 16 * 262144 * 16) break; lo[i] = cpos; cbuf[i] = g_vbo2; for (u32 v = 0; v < nv; v++) fetch(i, mn + v, (f32 *)(st + cpos + v * 16)); cpos += nv * 16; ncmp++; } }
+    if (cpos) { glBindBuffer(0x8892, g_vbo2); glBufferData(0x8892, cpos, st, 0x88E0); }
     PM(17)
     for (u32 i = 0; i < 16; i++) {
         u32 f = K(0x1760 + i * 4), type = f & 0xF, size = (f >> 4) & 0xF, stride = (f >> 8) & 0xFF;
-        if (size && type == 6) { glBindBuffer(0x8892, g_vbo2); glEnableVertexAttribArray(i); glVertexAttribPointer(i, 4, 0x1406, 0, 16, (void *)lo[i]); continue; }
+        if (size && type == 6) { glBindBuffer(0x8892, cbuf[i]); glEnableVertexAttribArray(i); glVertexAttribPointer(i, 4, 0x1406, 0, 16, (void *)lo[i]); continue; }
         if (!size || grp[i] == 0xFFFFFFFF) { glDisableVertexAttribArray(i); glVertexAttrib4fv(i, inl + i * 4); continue; }
         glBindBuffer(0x8892, gbuf[grp[i]]);
         void *o = (void *)(lo[i] - glo[grp[i]]);
@@ -1469,7 +1544,7 @@ static void do_draw_imm(u32 mode, u32 n, f32 *v) {
                 { u32 vv = (u32)(c[3] * 255); char d[12]; int zz = 0; do d[zz++] = (char)(0x30 + vv % 10); while (vv /= 10); while (zz) tx[q++] = d[--zz]; } tx[q++] = 0x0D; tx[q++] = 0x0A;
                 HANDLE fh = CreateFileA("menu_text_log.txt", 0x04, 1, 0, 4, 0x80, 0); if (fh != (HANDLE)-1) { DWORD w; WriteFile(fh, tx, q, &w, 0); CloseHandle(fh); } } } }
     hud_move(v, n, 64, mode);
-    zcount_draw(mode, n);
+    zcount_draw(mode, n); cap_draw('M', mode, n, n);
     PROG *p; if (mode < 1 || mode > 10 || !vsh_setup(&p)) { g_r->pad[1]++; return; }
     if (g_skip_draw) return;
     hud_squeeze(v, n, 64);
@@ -1505,8 +1580,8 @@ static void hud_move(f32 *v, u32 n, u32 stride, u32 mode) {
 
 /* ---- commands ---- */
 static void do_draw(u32 mode, u32 n, u32 *v) {
-    zcount_draw(mode, n);
-    if (!g_state_ok || g_state_prog != &g_fixedp) { if (!apply_state(&g_fixedp)) return; g_state_ok = 1; g_state_prog = &g_fixedp; }
+    cap_poll(); zcount_draw(mode, n); cap_draw('F', mode, n, n);
+    dbg_poll(); if (!g_state_ok || g_state_prog != &g_fixedp) { if (!apply_state(&g_fixedp)) return; g_state_ok = 1; g_state_prog = &g_fixedp; } dbg_apply();
     if (g_state_q && g_curp != g_state_q) prog_use(g_state_q);
     if (g_skip_draw) return;
     if (g_cur_fb) g_cur_fb->gpu_frame = GetTickCount();
@@ -1776,9 +1851,10 @@ static void present_memory(u32 addr) {
 #define ZREC 2048
 static GLuint g_zqs[ZSEG]; static u32 g_zval[ZSEG], g_zvalid[ZSEG];   /* segment results (g_zvalid = segment number + 1 when read) */
 static u32 g_zseg, g_zbase;                                            /* next segment number; first segment since the last reset */
-static struct { u32 addr, s0, s1, gs; } g_zrec[ZREC]; static u32 g_zrh, g_zrt;   /* pending reports (head = oldest) */
+static struct { u32 addr, s0, s1, gs, kind; } g_zrec[ZREC]; static u32 g_zrh, g_zrt;   /* pending reports (head = oldest) */
 static u32 g_zmin = 2, g_zfixed, g_zsync = 2;
 static void zq_stop(void) { if (!g_zrun) return; glEndQuery(0x8914 /* SAMPLES_PASSED */); g_zseg++; g_zrun = 0; }
+static u32 g_zkind;   /* the kind of test of the report being written (primitive << 16 | vertices) */
 static void zrep_write(u32 addr, u32 cnt);
 static int zseg_ready(u32 s) { u32 k = s % ZSEG; if (g_zvalid[k] == s + 1) return 1; GLuint a = 0; glGetQueryObjectuiv(g_zqs[k], 0x8867 /* RESULT_AVAILABLE */, &a); return a != 0; }
 static u32 zseg_val(u32 s) { u32 k = s % ZSEG; if (g_zvalid[k] != s + 1) { GLuint n = 0; glGetQueryObjectuiv(g_zqs[k], 0x8866 /* RESULT */, &n); g_zval[k] = n; g_zvalid[k] = s + 1; } return g_zval[k]; }
@@ -1787,7 +1863,7 @@ static void zq_poll(int force) {   /* write every report whose segments are done
         if (s1 > s0 && !force && !zseg_ready(s1 - 1)) break;
         u32 cnt = 0; for (u32 s = s0; s < s1; s++) cnt += zseg_val(s);
         u32 gs = g_zrec[i].gs; if (gs > 1) cnt = (cnt + gs * gs - 1) / (gs * gs);   /* counts in Xbox pixels (gs x gs GPU pixels per Xbox pixel) */
-        zrep_write(g_zrec[i].addr, cnt); g_zrh++; } }
+        g_zkind = g_zrec[i].kind; zrep_write(g_zrec[i].addr, cnt); g_zrh++; } }
 static void zq_start(void) { if (g_zrun || !g_zon) return;
     if (g_zrh != g_zrt && g_zseg - g_zrec[g_zrh % ZREC].s0 >= ZSEG - 1) zq_poll(1);   /* a pending report still needs the slot about to be reused */
     if (g_zseg - g_zbase >= ZSEG - 1) g_zbase = g_zseg - (ZSEG / 2);                  /* (counting for very long without a reset: keep the newest half) */
@@ -1797,6 +1873,16 @@ static void zrep_write(u32 addr, u32 cnt) {
     /* only while the report is still the game's pending one (word 3 = 0xFFFFFFFF, set by D3D before asking): a count arriving a
        frame late can find that memory freed and reused (a level load crashed reading 0x200 from an object); then it is dropped */
     if (r[3] != 0xFFFFFFFFu) { static u32 nd; if (nd++ < 5) { u32 v[2] = {addr, r[3]}; (void)v; } return; }
+    {   /* map pop-in: the game hides objects whose test counted 0 last frame. Live switches (every second): minreports.txt = every count at
+           least 1; minquads.txt = only the 4-vertex quad tests; minstrips.txt = only the 18-vertex strip tests */
+        static u32 tl, mq, ms; u32 t = GetTickCount(); if (t - tl > 1000) { tl = t; g_zmin = GetFileAttributesA("minreports.txt") != 0xFFFFFFFF ? 1 : 0;
+            mq = GetFileAttributesA("minquads.txt") != 0xFFFFFFFF; ms = GetFileAttributesA("minstrips.txt") != 0xFFFFFFFF; }
+        if (!cnt && ((mq && g_zkind == (8u << 16 | 4u)) || (ms && g_zkind == (6u << 16 | 18u)))) cnt = 1;
+        /* Terrain: the game draws a terrain section only if its 4-vertex quad test counts more than some threshold; ours counted 0 or too
+           few, so distant ground was never sent (it appeared as you walked up). Quad tests now report a full count; the sun-glare tests
+           (other shapes) keep real counts so the glare still hides behind mountains. realquads.txt (every second) = real counts. */
+        static u32 tq, rq; if (t - tq > 1000) { tq = t; rq = GetFileAttributesA("realquads.txt") != 0xFFFFFFFF; }
+        if (!rq && g_zkind == (6u << 16 | 18u)) cnt = 50000; }   /* the 18-vertex strips (boxes: the terrain sections' tests) report full; quads (the sun glare) stay real */
     r[0] = 0x44556677; r[1] = 0x00112233; r[2] = g_zfixed ? g_zfixed : (cnt ? cnt : g_zmin);
     __asm__ volatile("" ::: "memory"); r[3] = 0;   /* done last: the game reads the count once this word is no longer 0xFFFFFFFF */
     {   /* big-count probe (bigreports.txt): reports above 50000 (address, count) */
@@ -1820,11 +1906,11 @@ static void do_zpass(u32 op, u32 arg) {
     else if (op == 2 && arg + 16 <= 0x4000000) { zq_stop(); g_r->pad[43]++;
         /* the game's D3D marks a pending report with word 3 = 0xFFFFFFFF (count 0): it stays so until zrep_write fills in the count */
         if (g_zrt - g_zrh >= ZREC) zq_poll(1);
-        u32 i = g_zrt % ZREC; g_zrec[i].addr = arg; g_zrec[i].s0 = g_zbase; g_zrec[i].s1 = g_zseg; g_zrec[i].gs = g_cur_fb && g_cur_fb->gs ? g_cur_fb->gs : 1; g_zrt++;
+        u32 i = g_zrt % ZREC; g_zrec[i].addr = arg; g_zrec[i].s0 = g_zbase; g_zrec[i].s1 = g_zseg; g_zrec[i].gs = g_cur_fb && g_cur_fb->gs ? g_cur_fb->gs : 1; g_zrec[i].kind = g_zprim << 16 | (g_zverts & 0xFFFF); g_zrt++;
         zq_poll(g_zsync); zq_start(); }
 }
 static void do_flip(u32 addr) {
-    g_draw_seq++;
+    cap_poll(); cap_flip(); g_draw_seq++;
     {   /* every pixel count of this frame is written before the flip: one wait per frame, not one per report (counts arriving several
            frames late made objects flicker: the game hides and shows them by these counts). zlag.txt (read every second) = no wait at the flip. */
         static u32 tl, lag; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; lag = GetFileAttributesA("zlag.txt") != 0xFFFFFFFF; }

@@ -164,7 +164,9 @@ static s32 NTAPI NtAllocateVirtualMemory(void **base, u32 zb, u32 *size, u32 typ
     void *p = VirtualAlloc(*base, *size, type & 0x3000, prot ? prot : PAGE_READWRITE);
     if (!p && *base) p = VirtualAlloc(0, *size, type & 0x3000, prot ? prot : PAGE_READWRITE);
     if (!p) { static u32 nl; if (nl++ < 10) { out("  NtAllocateVirtualMemory: no room for "); hex(*size); out("\r\n"); } return 0xC0000017; } /* STATUS_NO_MEMORY */
-    *base = p; *size = (*size + 0xFFF) & ~0xFFF; return STATUS_SUCCESS;
+    *base = p; *size = (*size + 0xFFF) & ~0xFFF;
+    { static u32 nl2; if (*size >= 0x10000 && nl2 < 200) { nl2++; out("  [valloc] "); hex((u32)p); out(" size "); hex(*size); out("\r\n"); } }   /* large game allocations outside the pool (the GPU cannot see them) */
+    return STATUS_SUCCESS;
 }
 static s32 NTAPI NtFreeVirtualMemory(void **base, u32 *size, u32 type) {
     return VirtualFree(*base, type & MEM_RELEASE ? 0 : *size, type) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;

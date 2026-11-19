@@ -155,6 +155,14 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   No driver setting needed now: the full-screen window is 1 px taller than the monitor (bfview.c set_full; exactfull.txt = exact),
   which keeps Windows compositing it (an exact-size window got independent flip and tore), and the viewer presents without waiting
   (swap interval 0); the compositor shows the newest frame each refresh = triple buffering on any card. plainvsync.txt = interval 1.
+- Missing terrain (Nov 19): the game sends a terrain section only if its visibility test (pixel count of an 18-vertex triangle-strip
+  box, prim 6) counts enough; ours were 0 or too few, so ground appeared only when walked up to (also in older versions). bfgl.c
+  zrep_write: 18-vertex strip tests report 50000 (realquads.txt = real counts); 4-vertex quads (probably the sun glare) stay real -
+  glare not yet checked on a day level. Found with frame_capture.txt (capframe.txt: every draw of one frame + any-samples query)
+  and fixedreports.txt. Ruled out: speed fixes, camera, probe, depth clamp/range, drawing rules (dbg.txt letters), disc streaming.
+  With the whole map drawn, per-frame vertex hashing and CMP unpacking cost ~400 ms/s: CMP normals now cached per source range
+  (cmp_get; oldcmp.txt), faster 64-bit hash (oldhash.txt), and ranges unchanged for 30 checks are re-hashed every 8th frame
+  (staggered; hashall.txt = every frame). Busy spots ~55 fps; left: waits on pixel counts (~140 ms/s) and the probe readback.
 - Milestone 101 (hit marker): hitmarker.wav (from the user's clip) plays when the player's shot hits a character. Hook on the
   bullet ray call 0x2309ED (0x230040, stdcall 6 args; result arg4: +0x34 = SHOOTER, +0x44 = object hit; a character when
   [[obj+0xC]+4] == 3; alive when health, a float at character +0x54, is above 0) and on the pass-through path 0x2309CB

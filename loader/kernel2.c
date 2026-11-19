@@ -127,7 +127,8 @@ static s32 NTAPI NtReadFile(HANDLE h, HANDLE ev, void *apc, void *ctx, IOSB *io,
     BOOL r = ReadFile(h, buf, len, &n, 0);
     u32 st = !r ? err_status() : (n == 0 && len) ? ST_EOF : ST_OK;
     { static u32 nl; u32 pl = f ? slen(f->path) : 0; int tgz = pl > 4 && f->path[pl - 1] == 'z' && f->path[pl - 2] == 'g' && f->path[pl - 3] == 't';
-      if (!tgz && nl++ < 120) { out("  read "); out(f ? f->path + (slen(f->path) > 40 ? slen(f->path) - 40 : 0) : "?"); out(" len "); hex(len);
+      static u32 tl, on, nr; { IMP DWORD WINAPI GetTickCount(void); IMP DWORD WINAPI GetFileAttributesA(const char *); u32 t = GetTickCount(); if (t - tl > 1000) { tl = t; on = GetFileAttributesA("readlog.txt") != 0xFFFFFFFF; } }   /* readlog.txt: log reads while playing (terrain streaming) */
+      if (!tgz && (nl++ < 120 || (on && nr++ < 400))) { out("  read "); out(f ? f->path + (slen(f->path) > 40 ? slen(f->path) - 40 : 0) : "?"); out(" len "); hex(len);
         out(" at "); if (off) hex(*(u32 *)off); else out("cur"); out(" -> "); hex(st); out(" got "); hex(n); out(ev ? " (event)" : ""); out(apc ? " (apc)" : ""); out("\r\n"); } }
     io->status = st; io->info = n; if (ev) SetEvent(ev); return st;
 }
