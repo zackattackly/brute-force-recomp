@@ -111,12 +111,14 @@ static void menu_probe(void) {
 #define KB_MENU 0x4b42a002u
 #define KB_MSG 0x4b42a005u
 enum { KB_FWD, KB_BACKW, KB_LEFT, KB_RIGHT, KB_SPRINT, KB_A, KB_B, KB_X, KB_Y, KB_WHITE, KB_BLACK, KB_LT, KB_RT, KB_START, KB_BACKBTN,
-       KB_DUP, KB_DDOWN, KB_DLEFT, KB_DRIGHT, KB_L3, KB_R3, KB_N };
+       KB_DUP, KB_DDOWN, KB_DLEFT, KB_DRIGHT, KB_L3, KB_R3, KB_INTERACT, KB_N };
+static int g_x_src;   /* what pressed X from the keyboard: 1 Reload, 2 Interact (0: nothing / the controller) */
+static int interact_target(void);
 static const char *const g_kb_label[KB_N] = {"Move forward", "Move back", "Move left", "Move right", "Sprint", "Jump / accept (A)",
     "Inventory / back (B)", "Reload (X)", "Switch weapon (Y)", "Special skill (White)", "Medkit (Black)", "Use item (left trigger)",
     "Fire (right trigger)", "Pause (START)", "Objectives (BACK)", "Squad: up (D-pad)", "Squad: down (D-pad)", "Squad: left (D-pad)",
-    "Squad: right (D-pad)", "Left stick click", "Right stick click"};
-static const u8 g_kb_default[KB_N] = {'W', 'S', 'A', 'D', 0xA0, 0x20, 'V', 'F', 'R', 'Z', 'C', 'Q', 'E', 0x1B, 0x08, 0x26, 0x28, 0x25, 0x27, '1', '3'};
+    "Squad: right (D-pad)", "Left stick click", "Right stick click", "Interact / pick up"};
+static const u8 g_kb_default[KB_N] = {'W', 'S', 'A', 'D', 0xA0, 0x20, 'V', 'F', 'R', 'Z', 'C', 'Q', 0x01, 0x1B, 0x08, 0x26, 0x28, 0x25, 0x27, '1', '3', 'E'};
 static u8 g_kb[KB_N]; static int g_kb_loaded;
 static void kb_load(void) {
     if (g_kb_loaded) return; g_kb_loaded = 1; for (int i = 0; i < KB_N; i++) g_kb[i] = g_kb_default[i];
@@ -274,7 +276,10 @@ static u32 NTAPI XInputGetState_(u32 h, XSTATE *s) {
         if (esc_mode == 1 || key(0x0D)) b |= 0x10; if (kb_key(KB_BACKBTN)) b |= 0x20; if (kb_key(KB_L3)) b |= 0x40; if (kb_key(KB_R3)) b |= 0x80;
         if (kb_key(KB_A)) an[0] = 255; if (kb_key(KB_B) || esc_mode == 2) an[1] = 255;
         /* Milestone 103: menu clicks (bfgl.c menu_tick): the viewer presses private key codes 0x88 up, 0x89 down, 0x8A A, 0x8B B */
-        if (key(0x88)) b |= 1; if (key(0x89)) b |= 2; if (key(0x8A)) an[0] = 255; if (key(0x8B)) an[1] = 255; if (kb_key(KB_X)) an[2] = 255; if (kb_key(KB_Y)) an[3] = 255;
+        if (key(0x88)) b |= 1; if (key(0x89)) b |= 2; if (key(0x8A)) an[0] = 255; if (key(0x8B)) an[1] = 255; if (kb_key(KB_Y)) an[3] = 255;
+        {   /* X does both reload and pick up / use (the game picks up when the reticle's object can be). Reload presses X with that
+               object hidden from the game, so it always reloads; Interact (E by default) presses X with it kept, and only when there is one */
+            int r = kb_key(KB_X), e = kb_key(KB_INTERACT) && interact_target(); if (r || e) an[2] = 255; g_x_src = r ? 1 : e ? 2 : 0; }
         if (kb_key(KB_BLACK)) an[4] = 255; if (kb_key(KB_WHITE)) an[5] = 255; if (kb_key(KB_LT)) an[6] = 255; if (kb_key(KB_RT)) an[7] = 255;
         if (kb_key(KB_LEFT) || kb_key(KB_RIGHT)) s->lx = axis(kb_key(KB_LEFT), kb_key(KB_RIGHT)); if (kb_key(KB_FWD) || kb_key(KB_BACKW)) s->ly = axis(kb_key(KB_BACKW), kb_key(KB_FWD));
         if (key('J') || key('L')) s->rx = axis(key('J'), key('L')); if (key('I') || key('K')) s->ry = axis(key('K'), key('I'));
@@ -502,7 +507,10 @@ __attribute__((naked)) static void move_stub(void) { __asm__ volatile(
 extern u32 g_last_pad[3];
 static int x_held(void) { return ((g_last_pad[1] >> 16) & 255) > 30; }
 u32 aim_is_character(u32 t) { (void)t; return !x_held(); }   /* lock-on: cleared (1) unless X is held */
-u32 aim_reticle_keep(u32 t) { return x_held() ? t : 0; }
+static u32 g_rt;   /* the reticle's object as the game had it (before it is hidden) */
+static int interact_target(void) { u32 t = g_rt; if (!t || !readable((void *)t, 0x10)) return 0;   /* something under the reticle that is not a character */
+    u32 c = *(u32 *)(t + 0xC); if (c && readable((void *)c, 8) && *(u32 *)(c + 4) == 3) return 0; return 1; }
+u32 aim_reticle_keep(u32 t) { g_rt = t; return x_held() && g_x_src != 1 ? t : 0; }
 __attribute__((naked)) static void lock_stub1(void) { __asm__ volatile(
     "incl _g_lock_calls\n\t cmpl _g_player_char, %ebx\n\t jne 2f\n\t cmpl $0, _g_mouse_on\n\t je 2f\n\t testl %edi, %edi\n\t jz 2f\n\t"
     "pushal\n\t pushl %edi\n\t call _aim_is_character\n\t addl $4, %esp\n\t testl %eax, %eax\n\t popal\n\t jz 2f\n\t"   /* (popal leaves the flags alone) */

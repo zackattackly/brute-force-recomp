@@ -57,6 +57,10 @@ K32 BOOL WINAPI CloseHandle(HANDLE);
 static BOOL (WINAPI *w_option)(void *, u32, void *, u32); static void *(WINAPI *w_upgrade)(void *, u32);
 static u32 (WINAPI *w_wsend)(void *, u32, void *, u32); static u32 (WINAPI *w_wrecv)(void *, void *, u32, u32 *, u32 *); static u32 (WINAPI *w_wclose)(void *, u16, void *, u32);
 static int (WINAPI *p_select)(int, void *, void *, void *, const s32 *);
+__declspec(dllimport) int __stdcall QueryPerformanceCounter(long long *); __declspec(dllimport) int __stdcall QueryPerformanceFrequency(long long *);
+int _fltused;   /* (floating point without the C runtime) */
+static long long g_pp_q;   /* the precise send time of the panel's ping (GetTickCount steps 15.6 ms) */
+static u32 pp_ms(void) { long long t, f; QueryPerformanceCounter(&t); QueryPerformanceFrequency(&f); return (u32)((double)(t - g_pp_q) * 1000.0 / (double)f); }
 static volatile void *g_ws; static volatile u32 g_wlock, g_rx, g_tx, g_room, g_sock, g_txerr, g_ping_t, g_pong, g_pp_t; static SIN g_loader;
 static void wl(void) { while (__sync_lock_test_and_set(&g_wlock, 1)) Sleep(0); } static void wu(void) { __sync_lock_release(&g_wlock); }
 static void logl(const char *s) {   /* relay_log.txt next to the game: connects and disconnects only */
@@ -101,7 +105,7 @@ static u32 WINAPI rx_thread(void *unused) {   /* relay -> loader */
         if (e || type == 4 /* close */) { wl(); if (g_ws == ws) { g_ws = 0; w_close(ws); logl("relay connection lost"); } wu(); continue; }
         if (type == 0 && n == 4 && b[8] == 'P' && b[9] == 'O' && b[10] == 'N' && b[11] == 'G') {   /* the answer to our round-trip test */
             if (!g_pong && g_ping_t) { g_pong = 1; char t[96], *w = t; put(&w, "relay round trip ok ("); putn(&w, GetTickCount() - g_ping_t); put(&w, " ms): data flows both ways"); *w = 0; logl(t); }
-            else if (g_pp_t) { u32 m[3] = {0x504E4642 /* "BFNP" */, GetTickCount() - g_pp_t, 1}; g_pp_t = 0; p_sendto(g_sock, m, 12, 0, &g_loader, sizeof g_loader); }   /* the game's performance panel: ping to the relay */
+            else if (g_pp_t) { u32 m[3] = {0x504E4642 /* "BFNP" */, pp_ms(), 1}; g_pp_t = 0; p_sendto(g_sock, m, 12, 0, &g_loader, sizeof g_loader); }   /* the game's performance panel: ping to the relay */
             continue; }
         if (type == 0 /* a whole binary message */ && n >= 14) { *(u32 *)b = 0x324E4642; *(u32 *)(b + 4) = g_room; p_sendto(g_sock, b, (int)n + 8, 0, &g_loader, sizeof g_loader); g_rx++; } }
     return 0; }
@@ -114,7 +118,7 @@ static void relay_main(HANDLE parent, u32 room, u32 port) {
     g_sock = s; SIN ld = {2, bswap16((u16)port), 0x0100007F}; g_loader = ld;
     u32 tid; CreateThread(0, 0, rx_thread, 0, 0, &tid); CreateThread(0, 0, watchdog, 0, 0, &tid);
     static u8 b[2048]; u32 heard = GetTickCount(), tryat = heard, ka = 0, fails = 0;   /* (tryat = now, not 0: (int)(now - 0) is negative once a PC has been on for 24.8 days - it never tried to connect) */
-    logl("relay helper started (version 2026-11-17a)");
+    logl("relay helper started (version 2026-11-19a)");
     for (;;) {
         if (parent && WaitForSingleObject(parent, 0) == 0) break;   /* the game ended */
         u32 now = GetTickCount();
@@ -136,7 +140,7 @@ static void relay_main(HANDLE parent, u32 room, u32 port) {
                 if (g_rx != lrx || g_tx != ltx || g_txerr != lerr) { lrx = g_rx; ltx = g_tx; lerr = g_txerr; char t[120], *w = t; put(&w, "relay data: sent "); putn(&w, g_tx); put(&w, ", received "); putn(&w, g_rx);
                     if (g_txerr) { put(&w, ", send errors "); putn(&w, g_txerr); } *w = 0; logl(t); } } }
         {   static u32 tp; if (now - tp >= 2000) { tp = now;   /* every 2 s: a ping (answered by the relay) for the game's performance panel; not connected = report that */
-                if (g_ws && g_pong) { static u8 ping[4] = {'P', 'I', 'N', 'G'}; g_pp_t = GetTickCount() | 1; wl(); if (g_ws) w_wsend((void *)g_ws, 0, ping, 4); wu(); }
+                if (g_ws && g_pong) { static u8 ping[4] = {'P', 'I', 'N', 'G'}; g_pp_t = GetTickCount() | 1; QueryPerformanceCounter(&g_pp_q); wl(); if (g_ws) w_wsend((void *)g_ws, 0, ping, 4); wu(); }
                 else { u32 m[3] = {0x504E4642, 0, 0}; p_sendto(g_sock, m, 12, 0, &g_loader, sizeof g_loader); } } }
         if (g_ws && now - ka > 20000) { ka = now; static u8 z[1]; wl(); if (g_ws) w_wsend((void *)g_ws, 0, z, 1); wu(); }   /* keep the connection warm */
     }

@@ -163,6 +163,13 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   With the whole map drawn, per-frame vertex hashing and CMP unpacking cost ~400 ms/s: CMP normals now cached per source range
   (cmp_get; oldcmp.txt), faster 64-bit hash (oldhash.txt), and ranges unchanged for 30 checks are re-hashed every 8th frame
   (staggered; hashall.txt = every frame). Busy spots ~55 fps; left: waits on pixel counts (~140 ms/s) and the probe readback.
+- Prompts and interact (Nov 19): HUD messages ("Y switch to ...") use a 2nd icon sheet 256x512 hash 0x255B36DC (4 A/B/X/Y sets, found
+  by colour in texdump\); bfgl.c keysheet2_build puts key caps on them (g_cells2). Interact is its own action KB_INTERACT (22nd line
+  of keybinds.txt, default E): X icons show it. input.c: Reload presses X with the reticle object hidden (always reloads), Interact
+  presses X only when an object that is not a character is under the reticle (g_rt from aim_reticle_keep). E/R not yet tested.
+- Waits/ping (Nov 19): terrain box reports are written at once in do_zpass (no GPU wait); the probe reads its PBO two cycles later
+  (3 PBOs). bflist.c times the panel ping with QPC (version 2026-11-19a): 42-58 ms, but TCP connect to the nearest edge (PDX) is
+  ~45 ms itself, so the relay adds little; player-to-player = both pings. Lower needs direct connections (hole punching).
 - Milestone 101 (hit marker): hitmarker.wav (from the user's clip) plays when the player's shot hits a character. Hook on the
   bullet ray call 0x2309ED (0x230040, stdcall 6 args; result arg4: +0x34 = SHOOTER, +0x44 = object hit; a character when
   [[obj+0xC]+4] == 3; alive when health, a float at character +0x54, is above 0) and on the pass-through path 0x2309CB

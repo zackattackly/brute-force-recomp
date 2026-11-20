@@ -207,7 +207,7 @@ IMP BOOL WINAPI DeleteDC(void *);
 IMP BOOL WINAPI TextOutA(void *, int, int, const char *, int);
 IMP BOOL WINAPI TextOutW(void *, int, int, const u16 *, int);
 IMP BOOL WINAPI GetTextExtentPoint32W(void *, const u16 *, int, s32 *);
-static u8 g_kbv[21] = {'W', 'S', 'A', 'D', 0xA0, 0x20, 'V', 'F', 'R', 'Z', 'C', 'Q', 'E', 0x1B, 0x08, 0x26, 0x28, 0x25, 0x27, '1', '3'};   /* input.c's defaults */
+static u8 g_kbv[22] = {'W', 'S', 'A', 'D', 0xA0, 0x20, 'V', 'F', 'R', 'Z', 'C', 'Q', 0x01, 0x1B, 0x08, 0x26, 0x28, 0x25, 0x27, '1', '3', 'E'};   /* input.c's defaults */
 static u32 g_kb_sig, g_keyicons = 1;
 static const char *key_cap(u32 vk, char *b) {   /* a key cap's label: at most 4 characters */
     /* the caps are tiny on screen (~15x19 of 640x480): one big symbol reads far better than three letters.
@@ -224,14 +224,14 @@ static const char *key_cap(u32 vk, char *b) {   /* a key cap's label: at most 4 
     b[0] = '?'; b[1] = 0; return b; }
 static void kb_poll(void) {   /* keybinds.txt (input.c writes it; Pause/START is always Esc) and nokeyicons.txt, once a second */
     static u32 tl; u32 now = GetTickCount(); if (now - tl < 1000) return; tl = now;
-    u8 v[21]; for (int i = 0; i < 21; i++) v[i] = g_kbv[i];
+    u8 v[22]; for (int i = 0; i < 22; i++) v[i] = g_kbv[i];
     HANDLE f = CreateFileA("keybinds.txt", 0x80000000, 1, 0, 3, 0x80, 0);
     if (f != (HANDLE)-1) { char s[600]; DWORD n = 0; ReadFile(f, s, sizeof s - 1, &n, 0); CloseHandle(f); u32 k = 0, x = 0; int any = 0;
-        for (DWORD i = 0; i <= n && k < 21; i++) { char c = i < n ? s[i] : 10; if (c >= '0' && c <= '9') { x = x * 10 + (u32)(c - '0'); any = 1; } else if (c == 10) { if (any && x > 0 && x < 256) v[k] = (u8)x; k++; x = 0; any = 0; } else if (c == '#') { while (i < n && s[i] != 10) i++; i--; } } }
+        for (DWORD i = 0; i <= n && k < 22; i++) { char c = i < n ? s[i] : 10; if (c >= '0' && c <= '9') { x = x * 10 + (u32)(c - '0'); any = 1; } else if (c == 10) { if (any && x > 0 && x < 256) v[k] = (u8)x; k++; x = 0; any = 0; } else if (c == '#') { while (i < n && s[i] != 10) i++; i--; } } }
     v[13] = 0x1B;
-    u32 on = GetFileAttributesA("nokeyicons.txt") == 0xFFFFFFFF, sig = 2166136261u; for (int i = 0; i < 21; i++) sig = (sig ^ v[i]) * 16777619u; sig ^= on;
-    if (sig != g_kb_sig) { g_kb_sig = sig; for (int i = 0; i < 21; i++) g_kbv[i] = v[i]; g_keyicons = on;
-        for (u32 i = 0; i < NTC; i++) if (g_tc[i].tex && g_tc[i].w == 128 && g_tc[i].h == 256) g_tc[i].hash ^= 0x13579BDF; } }   /* the sheet is decoded again */
+    u32 on = GetFileAttributesA("nokeyicons.txt") == 0xFFFFFFFF, sig = 2166136261u; for (int i = 0; i < 22; i++) sig = (sig ^ v[i]) * 16777619u; sig ^= on;
+    if (sig != g_kb_sig) { g_kb_sig = sig; for (int i = 0; i < 22; i++) g_kbv[i] = v[i]; g_keyicons = on;
+        for (u32 i = 0; i < NTC; i++) if (g_tc[i].tex && ((g_tc[i].w == 128 && g_tc[i].h == 256) || (g_tc[i].w == 256 && g_tc[i].h == 512))) g_tc[i].hash ^= 0x13579BDF; } }   /* the sheets are decoded again */
 /* the button cells of the sheet (x0, y0, x1, y1 inclusive) and the binding each shows (index into g_kbv) */
 static const struct { u8 x0, y0, x1, y1, kb; } g_cells[] = {
     {29, 30, 43, 48, 5}, {46, 30, 60, 48, 6}, {64, 30, 78, 48, 7}, {82, 30, 96, 48, 8},          /* A B X Y */
@@ -297,8 +297,24 @@ static void keysheet_build(const u32 *src) {   /* src: the decoded 128x256 sheet
     for (u32 y = 0; y < 256 * KS; y++) for (u32 x = 0; x < 128 * KS; x++) g_keysheet[y * 128 * KS + x] = src[(y / KS) * 128 + x / KS];
     for (u32 i = 0; i < sizeof g_cells / sizeof g_cells[0]; i++) {
         u32 x0 = g_cells[i].x0, y0 = g_cells[i].y0, w = g_cells[i].x1 - x0 + 1, h = g_cells[i].y1 - y0 + 1; char b[8];
-        keycap(&g_keysheet[y0 * KS * 128 * KS + x0 * KS], 128 * KS, w * KS, h * KS, key_cap(g_cells[i].kb == 6 ? 0x1B : g_kbv[g_cells[i].kb], b)); } }   /* B (Back) shows Esc: Esc is Back in the menus (input.c) */
+        keycap(&g_keysheet[y0 * KS * 128 * KS + x0 * KS], 128 * KS, w * KS, h * KS, key_cap(g_cells[i].kb == 6 ? 0x1B : g_kbv[g_cells[i].kb == 7 ? 21 : g_cells[i].kb], b)); } }   /* B (Back) shows Esc: Esc is Back in the menus (input.c) */
 
+/* the second, bigger button sheet (256x512, content hash 0x255B36DC): the HUD messages ("Y switch to ...") take their icons from it.
+   Four sets of A/B/X/Y (two large, two small; found by colour); the other icons are left as they are. Shown at 2x. */
+#define KEYSHEET2_HASH 0x255B36DCu
+#define KS2 2
+static u32 g_keysheet2[256 * KS2 * 512 * KS2];
+static const struct { u16 x0, y0, x1, y1; u8 kb; } g_cells2[] = {
+    {3, 64, 29, 98, 5}, {36, 64, 62, 98, 6}, {70, 64, 97, 98, 7}, {103, 64, 129, 98, 8},
+    {158, 163, 184, 197, 5}, {2, 196, 30, 230, 6}, {36, 196, 64, 230, 7}, {68, 196, 94, 230, 8},
+    {44, 366, 58, 391, 5}, {64, 366, 84, 391, 6}, {89, 366, 108, 391, 7}, {114, 366, 130, 391, 8},
+    {135, 413, 150, 437, 5}, {154, 413, 174, 437, 6}, {182, 413, 199, 437, 7}, {204, 413, 220, 437, 8} };
+static void keysheet2_build(const u32 *src) {
+    for (u32 y = 0; y < 512 * KS2; y++) for (u32 x = 0; x < 256 * KS2; x++) g_keysheet2[y * 256 * KS2 + x] = src[(y / KS2) * 256 + x / KS2];
+    for (u32 i = 0; i < sizeof g_cells2 / sizeof g_cells2[0]; i++) {
+        u32 x0 = g_cells2[i].x0, y0 = g_cells2[i].y0, w = g_cells2[i].x1 - x0 + 1, h = g_cells2[i].y1 - y0 + 1; char b[8]; u32 k = g_cells2[i].kb;
+        for (u32 y = 0; y < h * KS2; y++) for (u32 x = 0; x < w * KS2; x++) g_keysheet2[(y0 * KS2 + y) * 256 * KS2 + x0 * KS2 + x] = 0;   /* the icon cleared */
+        keycap(&g_keysheet2[y0 * KS2 * 256 * KS2 + x0 * KS2], 256 * KS2, w * KS2, h * KS2, key_cap(k == 6 ? 0x1B : g_kbv[k == 7 ? 21 : k], b)); } }
 static GLuint tex_get(TI *t) {
     TCACHE *e = 0, *free_ = 0, *old = &g_tc[0]; ab_poll(); kb_poll();
     for (u32 i = 0; i < NTC; i++) {
@@ -315,7 +331,7 @@ static GLuint tex_get(TI *t) {
     for (u32 y = 0; y < t->h; y++) for (u32 x = 0; x < t->w; x++) g_tbuf[y * t->w + x] = texel(t, x, y);
     {   /* probe (texdump.txt, Milestone 99): every small texture once, as texdump\<hash>_<w>x<h>.bmp (to find the button icons) */
         static u32 on = 2, n, seen[512], ns; if (on == 2) on = GetFileAttributesA("texdump.txt") != 0xFFFFFFFF;
-        if (on && t->w <= 512 && t->h <= 512 && (t->w > 128 || t->h > 128) && n < 500) { u32 k = 0; while (k < ns && seen[k] != h) k++;
+        if (on && t->w <= 512 && t->h <= 512 && (t->w >= 16 && t->h >= 16) && n < 500) { u32 k = 0; while (k < ns && seen[k] != h) k++;
             if (k == ns && ns < 512) { seen[ns++] = h; n++; CreateDirectoryA("texdump", 0);
                 char nm[64]; u32 q = 0; const char *pre = "texdump\\"; while (*pre) nm[q++] = *pre++; for (int s = 28; s >= 0; s -= 4) nm[q++] = "0123456789abcdef"[(h >> s) & 15];
                 nm[q++] = '_'; { u32 v = t->w; char d[6]; int z = 0; do d[z++] = (char)('0' + v % 10); while (v /= 10); while (z) nm[q++] = d[--z]; } nm[q++] = 'x'; { u32 v = t->h; char d[6]; int z = 0; do d[z++] = (char)('0' + v % 10); while (v /= 10); while (z) nm[q++] = d[--z]; }
@@ -323,6 +339,10 @@ static GLuint tex_get(TI *t) {
                 HANDLE fh = CreateFileA(nm, 0x40000000, 0, 0, 2, 0x80, 0); if (fh != (HANDLE)-1) { u8 hd[54]; zero(hd, 54); u32 sz = t->w * t->h * 4; hd[0] = 'B'; hd[1] = 'M'; *(u32 *)(hd + 2) = 54 + sz; *(u32 *)(hd + 10) = 54; *(u32 *)(hd + 14) = 40;
                     *(s32 *)(hd + 18) = (s32)t->w; *(s32 *)(hd + 22) = -(s32)t->h; *(u16 *)(hd + 26) = 1; *(u16 *)(hd + 28) = 32; *(u32 *)(hd + 34) = sz; DWORD wr; WriteFile(fh, hd, 54, &wr, 0); WriteFile(fh, g_tbuf, sz, &wr, 0); CloseHandle(fh); } } } }
     glBindTexture(0x0DE1, e->tex);
+    if (g_keyicons && t->w == 256 && t->h == 512 && h == KEYSHEET2_HASH) {   /* the HUD messages' icons as key caps */
+        keysheet2_build(g_tbuf); glTexImage2D(0x0DE1, 0, 0x8058, 256 * KS2, 512 * KS2, 0, 0x80E1, 0x1401, g_keysheet2);
+        e->mips = !t->linear && ((t->fmt >> 16) & 0xF) > 1; if (e->mips) glGenerateMipmap(0x0DE1); g_last_mips = e->mips;
+        glTexParameterf(0x0DE1, 0x8501, -1.0f); return e->tex; }
     if (g_keyicons && t->w == 128 && t->h == 256 && h == KEYSHEET_HASH) {   /* Milestone 99: the button prompts as key caps */
         keysheet_build(g_tbuf); glTexImage2D(0x0DE1, 0, 0x8058, 128 * KS, 256 * KS, 0, 0x80E1, 0x1401, g_keysheet);
         e->mips = !t->linear && ((t->fmt >> 16) & 0xF) > 1; if (e->mips) glGenerateMipmap(0x0DE1); g_last_mips = e->mips;
@@ -1209,7 +1229,7 @@ static int razor_draw(u32 mode, u32 n, u32 nv, u32 mn, u32 mx, f32 *inl) {   /* 
    no blending: not smoke, particles or the HUD) is drawn a second time into that view's depth buffer, with back-face culling
    off (a one-sided wall the camera is behind still counts). At the flip the depth is read through two pixel-pack buffers (one
    frame late, no stall); the nearest distance goes to pad[80], pad[81] counts the readings. */
-static GLuint g_pfbo, g_ptex[2], g_ppbo[2]; static u32 g_pon, g_pseq, g_pdrawn, g_ppi, g_ppend[2]; static f32 g_pm[16], g_pnf[2], g_pnf_at[2][2];
+static GLuint g_pfbo, g_ptex[2], g_ppbo[3]; static u32 g_pon, g_pseq, g_pdrawn, g_ppi, g_ppend[3]; static f32 g_pm[16], g_pnf[2], g_pnf_at[3][2];
 /* Performance: redrawing every 3D object into the probe switched render targets twice per object (~60,000 times a second in a busy
    scene) and held busy scenes at ~37 fps (60 with the probe off). The objects are now split into g_pN groups by their vertex
    address; one group per frame is drawn into the probe, whose depth is read back once a whole cycle is drawn (every g_pN frames).
@@ -1294,20 +1314,20 @@ static void probe_flip(void) {
         glBindTexture(0x0DE1, g_ptex[1]); glTexImage2D(0x0DE1, 0, 0x81A6 /* DEPTH_COMPONENT24 */, 16, 16, 0, 0x1902, 0x1405, 0); glTexParameteri(0x0DE1, 0x2800, 0x2600); glTexParameteri(0x0DE1, 0x2801, 0x2600);
         glBindTexture(0x0DE1, 0);
         glGenFramebuffers(1, &g_pfbo); glBindFramebuffer(0x8D40, g_pfbo); glFramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, g_ptex[0], 0); glFramebufferTexture2D(0x8D40, 0x8D00 /* DEPTH */, 0x0DE1, g_ptex[1], 0);
-        glGenBuffers(2, g_ppbo); for (int k = 0; k < 2; k++) { glBindBuffer(0x88EB, g_ppbo[k]); glBufferData(0x88EB, 16 * 16 * 4, 0, 0x88E1); } glBindBuffer(0x88EB, 0);
+        glGenBuffers(3, g_ppbo); for (int k = 0; k < 3; k++) { glBindBuffer(0x88EB, g_ppbo[k]); glBufferData(0x88EB, 16 * 16 * 4, 0, 0x88E1); } glBindBuffer(0x88EB, 0);
         g_pdrawn = 1; }   /* (cleared below) */
     if (g_pon && g_pfbo) probe_replay(); else { g_nprec = 0; g_npidx = 0; g_npvtx = 0; g_npcon = 0; }
     {   u32 ph = g_pphase; g_pphase = (g_pphase + 1) % g_pN; if (ph != g_pN - 1) return; }   /* mid-cycle: the probe's depth keeps accumulating */
     if (g_pdrawn) {   /* this cycle's probe -> a pixel-pack buffer; last cycle's -> the nearest distance */
         glBindFramebuffer(0x8CA8, g_pfbo); glBindBuffer(0x88EB, g_ppbo[g_ppi]); glReadPixels(0, 0, 16, 16, 0x1902, 0x1406, 0);
         g_ppend[g_ppi] = 1; g_pnf_at[g_ppi][0] = g_pnf[0]; g_pnf_at[g_ppi][1] = g_pnf[1];
-        u32 o = g_ppi ^ 1;
+        u32 o = (g_ppi + 1) % 3;   /* the oldest: read two cycles later, so the GPU is long done (performance) */
         if (g_ppend[o]) { static f32 d[256]; glBindBuffer(0x88EB, g_ppbo[o]); glGetBufferSubData(0x88EB, 0, sizeof d, d); g_ppend[o] = 0;
             f32 mn = 1.0f; for (int k = 0; k < 256; k++) if (d[k] < mn) mn = d[k];
             f32 n = g_pnf_at[o][0], fa = g_pnf_at[o][1], dist = 1e9f;
             if (mn < 0.99999f && fa > n) { f32 z = mn * 2.0f - 1.0f; dist = 2.0f * fa * n / (fa + n - z * (fa - n)); }
             g_r->pad[80] = *(u32 *)&dist; __sync_synchronize(); g_r->pad[81]++; }
-        glBindBuffer(0x88EB, 0); g_ppi ^= 1;
+        glBindBuffer(0x88EB, 0); g_ppi = (g_ppi + 1) % 3;
         glBindFramebuffer(0x8D40, g_pfbo); glDisable(0x0C11); glDepthMask(1); glClearDepth(1.0); glClear(0x0100); g_pdrawn = 0;
         g_state_ok = 0; state_cache_reset(); } }
 static void do_draw_idx(u32 mode, u32 n, u32 mn, u32 mx, f32 *inl, u32 *idx) {
@@ -1903,6 +1923,8 @@ static void do_zpass(u32 op, u32 arg) {
         HANDLE f = CreateFileA("fixedreports.txt", 0x80000000, 1, 0, 3, 0x80, 0); if (f != (HANDLE)-1) { char t[16]; DWORD n = 0; ReadFile(f, t, 15, &n, 0); CloseHandle(f); u32 v = 0; for (DWORD k = 0; k < n; k++) if (t[k] >= 0x30 && t[k] <= 0x39) v = v * 10 + t[k] - 0x30; g_zfixed = v ? v : 100000; } }
     if (op == 0) { zq_stop(); g_zbase = g_zseg; g_zdraws = g_zverts = 0; zq_start(); }
     else if (op == 1) { if (arg) { g_zon = 1; zq_start(); } else { zq_stop(); g_zon = 0; } }
+    else if (op == 2 && arg + 16 <= 0x4000000 && g_zprim == 6 && g_zverts == 18 && GetFileAttributesA("realquads.txt") == 0xFFFFFFFF) {
+        zq_stop(); g_zkind = 6u << 16 | 18u; zrep_write(arg, 0); zq_start(); }   /* terrain box test: its fixed count at once (performance) */
     else if (op == 2 && arg + 16 <= 0x4000000) { zq_stop(); g_r->pad[43]++;
         /* the game's D3D marks a pending report with word 3 = 0xFFFFFFFF (count 0): it stays so until zrep_write fills in the count */
         if (g_zrt - g_zrh >= ZREC) zq_poll(1);
