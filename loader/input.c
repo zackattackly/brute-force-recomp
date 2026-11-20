@@ -126,6 +126,7 @@ static void kb_load(void) {
     HANDLE f = CreateFileA("keybinds.txt", 0x80000000, 1, 0, 3, 0x80, 0); if (f == (HANDLE)-1) return;
     char t[512]; DWORD n = 0; ReadFile(f, t, 511, &n, 0); CloseHandle(f); int k = 0, v = 0, any = 0;
     for (DWORD i = 0; i <= n && k < KB_N; i++) { char c = i < n ? t[i] : 10; if (c >= 0x30 && c <= 0x39) { v = v * 10 + c - 0x30; any = 1; } else if (c == 10) { if (any && v > 0 && v < 256) g_kb[k] = (u8)v; if (any || c == 10) k++; v = 0; any = 0; } }
+    if (k < KB_N && g_kb[KB_RT] == 'E') g_kb[KB_RT] = 0x01;   /* a file from before Interact (E): its old default Fire on E moves to the left button */
     g_kb[KB_START] = 0x1B;   /* Milestone 97: Pause (START) is always Esc (user); it is not in the list (Enter is START too) */
     out("  [keybinds] loaded keybinds.txt\r\n"); }
 static void kb_save(void) {
