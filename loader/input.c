@@ -18,6 +18,12 @@ IMP void *WINAPI LoadLibraryA(const char *);
 IMP void *WINAPI GetProcAddress(void *, const char *);
 void *gpu_window(void);
 IMP DWORD WINAPI GetFileAttributesA(const char *);
+/* switch files (loader\*.txt) looked up at most once a second each: dozens of per-frame GetFileAttributesA calls on the OneDrive folder
+   cost frames. Keyed by the name literal's address. */
+static DWORD fattr_cached(const char *nm) {
+    static const char *k[96]; static DWORD v[96]; static u32 t[96]; static int n; u32 now = GetTickCount();
+    for (int i = 0; i < n; i++) if (k[i] == nm) { if (now - t[i] > 1000) { t[i] = now; v[i] = GetFileAttributesA(nm); } return v[i]; }
+    DWORD r = GetFileAttributesA(nm); if (n < 96) { k[n] = nm; v[n] = r; t[n] = now; n++; } return r; }
 
 typedef struct { u32 packet; u16 buttons; u8 lt, rt; short lx, ly, rx, ry; } PCSTATE;
 typedef struct { u16 l, r; } PCVIB;
@@ -69,7 +75,7 @@ void menu_sel_probe(void) {
             if (m && readable(m + 8, 4)) { u8 *sen = *(u8 **)(m + 8); if (sen && readable(sen + 4, 4)) { u8 *node = *(u8 **)(sen + 4);
                 if (node && node != sen && readable(node + 8, 4)) { u8 *mo = *(u8 **)(node + 8); if (mo && readable(mo + 0x88, 4)) st = 1 + (*(u32 *)(mo + 0x88) ? 1 : 0); } } }
             pd[57] = st; } }
-    static u32 on = 2, tl; if (on == 2) on = GetFileAttributesA("menusel.txt") != 0xFFFFFFFF; if (!on) return;
+    static u32 on = 2, tl; if (on == 2) on = fattr_cached("menusel.txt") != 0xFFFFFFFF; if (!on) return;
     u32 now = GetTickCount(); if (now - tl < 150) return; tl = now;
     u8 *m = menu_system(); if (!m || !readable(m + 8, 4)) return; u8 *sen = *(u8 **)(m + 8); if (!sen || !readable(sen + 4, 4)) return;
     u8 *node = *(u8 **)(sen + 4); if (!node || node == sen || !readable(node + 8, 4)) return; u8 *menu = *(u8 **)(node + 8); if (!menu || !readable(menu, 0x400)) return;
@@ -87,7 +93,7 @@ void menu_sel_probe(void) {
     #undef PTRV
     }
 static void menu_probe(void) {
-    static u32 on = 2, tl, n; u32 nw = GetTickCount(); if (on == 2) on = GetFileAttributesA("menuprobe.txt") != 0xFFFFFFFF; if (!on || nw - tl < 1000) return; tl = nw; n++;
+    static u32 on = 2, tl, n; u32 nw = GetTickCount(); if (on == 2) on = fattr_cached("menuprobe.txt") != 0xFFFFFFFF; if (!on || nw - tl < 1000) return; tl = nw; n++;
     u8 *m = menu_system(); if (!m || !readable(m, 0x200)) { out("  [menuprobe] no menu system\r\n"); return; }
     {   /* the open menus: a list at system +4 (sentinel node [system+8]; nodes: +0 next, +4 prev, +8 menu object), pushed at the back by vfunc 0 */
         u8 *sen = *(u8 **)(m + 8); out("  [menulist]"); int k = 0;
@@ -324,7 +330,7 @@ static u32 NTAPI XInputGetState_(u32 h, XSTATE *s) {
     {   /* mousetest.txt (Milestone 87 calibration): with a player, 4 phases of 4 s: stick right, simulated mouse right, stick
            up, simulated mouse up; the log shows the signed turn (facing) and pitch change of each phase */
         static u32 on = 2, t0; static float pfx, pfz, yaw, p0; static s32 ph = -1; extern u32 g_mt_active;
-        if (on == 2) on = GetFileAttributesA("mousetest.txt") != 0xFFFFFFFF;
+        if (on == 2) on = fattr_cached("mousetest.txt") != 0xFFFFFFFF;
         u8 *c = (u8 *)g_player_char; extern volatile s32 g_fake_dx, g_fake_dy;
         if (on && c) { u32 t = GetTickCount(); float fx = *(float *)(c + 0x5BC + 24), fz = *(float *)(c + 0x5BC + 32);
             if (ph < 0) { ph = 0; t0 = t; yaw = 0; p0 = *(float *)(c + 0x5F4); }
@@ -340,7 +346,7 @@ static u32 NTAPI XInputGetState_(u32 h, XSTATE *s) {
     {   /* speedtest.txt (Milestone 87, sprint): with a player, 6 s of full forward stick; every 0.5 s the measured ground
            speed and the character's float fields between 2 and 12 */
         static u32 on = 2, t0, tl, n; static float px, pz; extern u32 g_mt_active;
-        if (on == 2) on = GetFileAttributesA("speedtest.txt") != 0xFFFFFFFF;
+        if (on == 2) on = fattr_cached("speedtest.txt") != 0xFFFFFFFF;
         u8 *c = (u8 *)g_player_char;
         (void)t0;
         if (on && c && n < 60) { u32 t = GetTickCount(); if (!tl) tl = t;   /* passive: logs while the player moves */
@@ -355,11 +361,11 @@ static u32 NTAPI XInputGetState_(u32 h, XSTATE *s) {
         {   /* Milestone 93: shooting (left button) also stops the sprint, and keeps it off for 0.5 s after the last shot */
             int view_key(int); static u32 tshot; if (g_mouse_on && view_key(0x01)) tshot = GetTickCount();
             int shooting = tshot && GetTickCount() - tshot < 500;
-            g_sprinting = kb_key(KB_SPRINT) && moving && !(g_mouse_on && g_aiming) && !shooting; } }
+            { int lock_mode_ext(void); g_sprinting = kb_key(KB_SPRINT) && moving && !(g_mouse_on && g_aiming) && !shooting && !lock_mode_ext(); } } }   /* no sprint during a special (it shook the lock-on view) */
     kb_screen(&b, an, s);   /* Milestone 96: the KEY BINDINGS screen owns the keyboard while it is open */
     {   /* testing aid: while loader\auto_press.txt exists, START + A are tapped for 0.2 s every 4 s */
         static u32 t_chk, on; u32 t = GetTickCount();
-        if (t - t_chk > 1000) { t_chk = t; on = GetFileAttributesA("auto_press.txt") != 0xFFFFFFFF; }
+        if (t - t_chk > 1000) { t_chk = t; on = fattr_cached("auto_press.txt") != 0xFFFFFFFF; }
         extern u32 g_mt_active; if (on && t % 4000 < 200 && !g_mt_active) { b |= 0x10; an[0] = 255; }
     }
     s->buttons = b; for (u32 i = 0; i < 8; i++) s->analog[i] = an[i];
@@ -427,7 +433,7 @@ volatile s32 g_fake_dx, g_fake_dy;   /* mousetest.txt: simulated movement */
 static int req_motion(u8 *c, u32 id) { u32 r, f = 0x12EAB0;
     __asm__ volatile("pushl $0\n\t call *%4" : "=a"(r) : "a"(id), "c"(*(u32 *)(c + 0xC)), "S"(c), "D"(f) : "edx", "memory", "cc"); return r & 0xFF; }
 static void pose_update(u8 *c) {
-    extern u32 g_sprinting; static u32 off = 2; if (off == 2) off = GetFileAttributesA("nodash.txt") != 0xFFFFFFFF; if (off) return;
+    extern u32 g_sprinting; static u32 off = 2; if (off == 2) off = fattr_cached("nodash.txt") != 0xFFFFFFFF; if (off) return;
     u8 *cur = *(u8 **)(c + 0x1FC), *rq = *(u8 **)(c + 0x200); u32 id = (u32)cur > 0x10000 ? *(u32 *)cur : 0xFFFFFFFF, rid = (u32)rq > 0x10000 ? *(u32 *)rq : 0xFFFFFFFF;
     static u32 n, ours; int r = -1;   /* ours: we switched RUN -> DASH (only then switch back) */
     if (g_sprinting && id == 34 && rid != 8) { r = req_motion(c, 8); if (r) ours = 1; }
@@ -437,14 +443,75 @@ u32 g_switch_tick;   /* last weapon-switch press */ u32 g_sprint_pct = 50; float
 u32 g_ctl_tick;   /* last time the player's input was applied (no pose during cutscenes) */
 static int readable(const void *p, u32 n); static void fo(float v);
 u32 g_input_tid; IMP DWORD WINAPI GetCurrentThreadId(void);
+static int lock_char(void);   /* a special's lock-on is holding a target (defined below) */
+static int special_steady(void);
+static float g_projB[2][16]; static volatile u32 g_proj_t, g_proj_i; extern float g_hip_p11;
+static int scoped(void) { u8 *pc = (u8 *)g_player_char; int z = pc && readable(pc + 0x7A8, 4) && *(u32 *)(pc + 0x7A8);   /* zoom level at player +0x7A8 */
+    if (z && g_proj_t && fattr_cached("zoomflagonly.txt") == 0xFFFFFFFF) { float p11 = g_projB[g_proj_i & 1][5]; if (p11 < 0) p11 = -p11;   /* and the view really zoomed: the flag stayed set
+        after a special / weapon change (the camera sat inside Flint) */
+        if (p11 > 0.5f && p11 < g_hip_p11 * 1.4f) z = 0; }
+    u32 *pd = gpu_pad(); if (pd) { pd[52] = 320; pd[53] = z ? 240 : 190; } return z; }   /* the viewer reads the depth under this pixel for the re-aim */
+static float sqrt_(float x); static int special_on(void); static int special_steady(void); static int special_hold(void); static int lock_mode(void);
+/* scope zoom-in without the pop: the scope camera's eye relative to the character (right, up, forward), learnt once it settles; on zoom-in the
+   aim goes straight at the reticle's point from there, and for 0.5 s (the game's own zoom-in slide) cam_build shows that final view */
+static float g_projB[2][16]; static volatile u32 g_proj_t, g_proj_i;   /* (defined with vp_watch) */
+static int inv4(const float *m, float *o);
+u8 *g_cover_block_tg; u32 g_cover_block_until; float g_cover_frac;   /* the lock's cover test: a target more than 45% covered is let go for 1 s */
+int g_aim_part;   /* which part of a locked target the shot aims at (0 chest, 1 head, 2 hips, 3 left, 4 right) */
+float g_zT[3], g_zM0[3]; u32 g_zT_t; float *g_zsd;   /* + the gun's position and the weapon's stored-direction slot (the trail) */   /* zoomed shot: the point the trail ends at (the hit ray is steered there, bray_wrap) */
+float g_lockcam_yaw, g_lockcam_pitch; int g_lockcam_on;   /* the lock camera's direction (cam_build), which Flint follows (mouse_apply) */
+static float g_turn_sgn = 1.0f; static float g_cam_yaw, g_yaw_off; static int g_yaw_act, g_yaw_own;   /* g_yaw_own: zoomed - the camera's yaw is g_cam_yaw (Flint twitched during the game's zoom animation) */   /* g_yaw_off: zoom - the camera's yaw relative to Flint's (eased; Flint is not turned) */   /* zoom: our camera's own yaw while it eases (cam_build) */
+static float g_sc_off[3] = {0.0f, 0.444f, -0.485f}, g_sc_E[3], g_sc_D[3], g_sc_dp, g_sc_yaw, g_hip_E[3], g_hip_F[3]; static float g_game_F[3], g_zmouse, g_zyaw0;   /* zoom: the mouse's turn while zoomed in (turn-queue units), Flint's yaw at zoom-in */ static int g_sc_have, g_sc_phase; static u32 g_zoom_t, g_sc_t0, g_sc_t1;
+/* g_sc_phase: 1 = gliding from the shoulder view to the final scope view (0.15 s) and holding it until the game's scope camera matches it,
+   2 = blending into the game's scope camera (0.15 s), 0 = the game's scope camera */
+static void char_basis(u8 *c, float *pos, float *R, float *F) {   /* position (+0x24) and the horizontal right / forward axes of the aim matrix */
+    float *x = ((float *(__thiscall *)(void *))(*(u32 **)c)[0x40 / 4])(c) + 9; float *A = (float *)(c + 0x5BC);
+    for (int k = 0; k < 3; k++) pos[k] = x[k]; float fx = -A[2], fz = -A[8], l = sqrt_(fx * fx + fz * fz); if (l < 1e-4f) l = 1; F[0] = fx / l; F[1] = 0; F[2] = fz / l;
+    float rx = A[0], rz = A[6], m = sqrt_(rx * rx + rz * rz); if (m < 1e-4f) m = 1; R[0] = rx / m; R[1] = 0; R[2] = rz / m; }
+/* the special's target switching (not zoomed): characters the game considered for the lock (aim_is_character) are remembered; a mouse
+   swipe left or right moves the lock to the nearest one on that side of the screen (g_forced), held until it is gone, another swipe
+   or the special's end. noswipe.txt = off */
+extern u32 g_rt; static u8 *g_cand[16]; static u32 g_cand_t[16]; u8 *g_forced;
+static int char_is(u8 *q) { if (!q || q == (u8 *)g_player_char || (u32)q < 0x80000000u || ((u32)q & 3) || !readable(q, 0x10)) return 0;   /* game objects live at 0x80000000 and up (a low look-alike crashed in its vfunc) */
+    { u32 vt = *(u32 *)q; if (vt < 0x10000 || vt > 0x500000 || !readable((void *)vt, 0x44) || ((u32 *)vt)[0x40 / 4] < 0x10000 || ((u32 *)vt)[0x40 / 4] > 0x400000) return 0; } u8 *k = *(u8 **)(q + 0xC); if (!(k && readable(k, 8) && *(u32 *)(k + 4) == 3 && readable(*(void **)q, 0x44))) return 0;
+    return readable(q + 0x54, 4) && *(s32 *)(q + 0x54) != 0; }   /* alive: health (+0x54, 0 when dead - README Milestone 7). The lock held on to dead enemies */
+u32 g_cand_seen;
+void cand_add(u8 *q) { if (!char_is(q)) return; g_cand_seen++; u32 now = GetTickCount(), old = 0; int slot = -1;
+    for (int i = 0; i < 16; i++) { if (g_cand[i] == q) { g_cand_t[i] = now; return; } if (slot < 0 || g_cand_t[i] < old) { slot = i; old = g_cand_t[i]; } }
+    g_cand[slot] = q; g_cand_t[slot] = now; }
+static float *char_xf(u8 *q) { return ((float *(__thiscall *)(void *))(*(u32 **)q)[0x40 / 4])(q); }
+static void target_swipe(int dir, u8 *cur) {   /* dir +1 = right on screen */
+    extern float g_eye_ours[3], g_cr[3], g_cb[3]; u32 now = GetTickCount(); float s0 = 0; int have0 = 0;
+    if (char_is(cur)) { float *x = char_xf(cur); float v[3] = {x[9] - g_eye_ours[0], x[10] - g_eye_ours[1], x[11] - g_eye_ours[2]}; float f = -(v[0] * g_cb[0] + v[1] * g_cb[1] + v[2] * g_cb[2]); if (f > 0.5f) { s0 = (v[0] * g_cr[0] + v[1] * g_cr[1] + v[2] * g_cr[2]) / f; have0 = 1; } }
+    u8 *best = 0; float bd = 1e9f;
+    for (int i = 0; i < 16; i++) { u8 *q = g_cand[i]; if (!q || q == cur || now - g_cand_t[i] > 4000 || !char_is(q)) continue;
+        float *x = char_xf(q); float v[3] = {x[9] - g_eye_ours[0], x[10] - g_eye_ours[1], x[11] - g_eye_ours[2]}; float f = -(v[0] * g_cb[0] + v[1] * g_cb[1] + v[2] * g_cb[2]); if (f < 1.0f) continue;
+        float sd = (v[0] * g_cr[0] + v[1] * g_cr[1] + v[2] * g_cr[2]) / f, d = (sd - (have0 ? s0 : 0.0f)) * (float)dir; if (d > 0.01f && d < bd) { bd = d; best = q; } }
+    { static u32 nl; if (nl++ < 40) { out("  [swipe] "); out(dir > 0 ? "right" : "left"); out(" from "); hex((u32)cur); out(" to "); hex((u32)best); out("\r\n"); } }
+    if (best) g_forced = best; }
 void mouse_apply(u8 *c) {
-    g_input_tid = GetCurrentThreadId();
+    {   /* frame cap (Nov 21): after the speed fixes the game ran ~170 frames/s against a 60 Hz screen; each shown frame was the newest
+           of ~3 unevenly spaced ones (choppy aiming) and the viewer fell behind. As on the Xbox: one game frame per screen refresh (the
+           vblank counter follows the monitor), at most 20 ms of waiting. nofpscap.txt = uncapped */
+        extern u32 g_vblanks; static u32 lastvb; IMP void WINAPI Sleep(DWORD);
+        if (fattr_cached("nofpscap.txt") == 0xFFFFFFFF) { u32 t0 = GetTickCount(); while (*(volatile u32 *)&g_vblanks == lastvb && GetTickCount() - t0 < 20) Sleep(0); }
+        lastvb = *(volatile u32 *)&g_vblanks; }
+    g_input_tid = GetCurrentThreadId(); (void)scoped();   /* every frame: the viewer samples depth under the right crosshair */
+    if (readable(c + 0x490, 4) && *(float *)(c + 0x490) < 60.0f && fattr_cached("infinitespecial.txt") != 0xFFFFFFFF) *(float *)(c + 0x490) = 100.0f;   /* test: the special's energy refilled below 60 (it still drains: special_on sees the drop) */
     g_ctl_tick = GetTickCount(); (void)pose_update;   /* Milestone 93: the RUN/DASH switch is off (DASH is already the run of these characters; switching fought the game's own requests and froze the animation) */
     int view_mouse(s32 *, s32 *); s32 mx, my; view_mouse(&mx, &my); mx += g_fake_dx; my += g_fake_dy;
     static s32 lx, ly, init; static s64 lt, qf; s64 now; if (!qf) QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&now);
     if (!init || c != g_player_char) { init = 1; lx = mx; ly = my; lt = now; return; }
     float dt = (float)(now - lt) / (float)qf; s32 dx = mx - lx, dy = my - ly; lx = mx; ly = my; lt = now;
     if (dt <= 0.0005f || dt > 0.25f) return;
+    {   static u32 tl0, off0; u32 n0 = GetTickCount(); if (n0 - tl0 > 1000) { tl0 = n0; off0 = fattr_cached("nolocksteer.txt") != 0xFFFFFFFF; }
+        if (!lock_mode()) g_forced = 0; else if (g_forced && !char_is(g_forced)) g_forced = 0;
+        if (lock_char() && !scoped() && fattr_cached("noswipe.txt") == 0xFFFFFFFF) {   /* a swipe: 60 px of mouse within 0.25 s */
+            static s32 acc; static u32 acc_t, cool; u32 nw = GetTickCount(); if (nw - acc_t > 250) { acc = 0; acc_t = nw; } acc += dx;
+            if ((acc > 60 || acc < -60) && nw - cool > 400) { u8 *r = (u8 *)g_rt; u8 *cur = g_forced ? g_forced : (r && readable(r + 0x5D0, 4) ? *(u8 **)(r + 0x5D0) : 0); target_swipe(acc > 0 ? 1 : -1, cur); acc = 0; acc_t = nw; cool = nw; } }
+        { s32 adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy; if (adx + ady > 3) { extern u32 g_mouse_move_t; g_mouse_move_t = GetTickCount(); } }   /* mouse input stops the lock */
+        u8 *lock_target(void); if (!off0 && lock_target()) { g_yaw_own = 0; g_yaw_off = 0;
+            dx = 0; dy = 0; } }   /* locked: the mouse only swipes; the camera turns to the target (cam_build) and Flint follows it (below) */   /* locked: the game's own lock turns Flint (ours on top of it was choppy); the camera follows her */   /* opt-in (locksteer.txt): taking the mouse made aiming choppy */   /* locked: the mouse only swipes; Flint and the camera are steered at the target below */   /* a chosen target: Flint is steered at it below (the mouse only swipes) */   /* (zoomed: the camera follows the lock's aim, not its own zoom yaw) */   /* locked on: the game steers the aim; our pitch and turn fought it (screen shake). nolocksteer.txt = off */
     float k = (float)g_mouse_sens * 0.00006f;   /* radians per pixel: 0.003 at the default 50 */
     {   /* Milestone 93: slower turning while sprinting (sprintsens.txt: percent, default 50) */
         extern u32 g_sprinting; static u32 pct = 50, tl; u32 nw = GetTickCount(); if (nw - tl > 1000) { tl = nw; pct = 50; HANDLE f = CreateFileA("sprintsens.txt", 0x80000000, 1, 0, 3, 0x80, 0);
@@ -453,10 +520,10 @@ void mouse_apply(u8 *c) {
         { static u32 tl2; u32 n2 = GetTickCount(); if (g_sprinting && n2 - tl2 > 3000) { tl2 = n2; out("  [sens] sprinting: mouse x"); dec(pct); out("%\r\n"); } } }
     /* aim mode (Milestone 87): right button held = the game's zoom (Character_DoAction 16 = zoom in one level, 19 = zoom
        out; zoom level at +0x7A8; weapons without a scope have none) and a slower mouse */
-    { int view_key(int); extern u32 g_aiming; static u32 fa, tfa; u32 nf = GetTickCount(); if (nf - tfa > 1000) { tfa = nf; fa = GetFileAttributesA("forceaim.txt") != 0xFFFFFFFF; } g_aiming = view_key(0x02) || fa; }   /* forceaim.txt: test */   /* right button: our aim state (camera, see view_adjust) */
+    { int view_key(int); extern u32 g_aiming; static u32 fa, tfa; u32 nf = GetTickCount(); if (nf - tfa > 1000) { tfa = nf; fa = fattr_cached("forceaim.txt") != 0xFFFFFFFF; } g_aiming = view_key(0x02) || fa; }   /* forceaim.txt: test */   /* right button: our aim state (camera, see view_adjust) */
     /* turning: 1:1 with the mouse, but at most 7 rad/s; faster swipes are spread over the next frames (backlog <= 1.5 rad)
        so the body and the camera keep up */
-    static float pend; pend += (float)(dx * g_yaw_sign) * k; if (pend > 3.0f) pend = 3.0f; if (pend < -3.0f) pend = -3.0f;
+    static float pend; pend += (float)(dx * g_yaw_sign) * k; if (g_zoom_t) g_zmouse += (float)(dx * g_yaw_sign) * k; if (pend > 3.0f) pend = 3.0f; if (pend < -3.0f) pend = -3.0f;
     if (pend != 0.0f && !*(u32 *)(c + 0x604) && !*(u32 *)(c + 0x638)) { float step = pend, lim = 60.0f * dt;   /* Milestone 95: 15 rad/s queued fast flicks (up to 3 rad behind the mouse) */ { extern u32 g_sprinting; extern u32 g_sprint_pct; if (g_sprinting) lim *= (float)g_sprint_pct * 0.01f; }   /* the turn-rate cap is slowed too while sprinting */   /* up to 15 rad/s (the camera is built from the character, so it keeps up) */ if (step > lim) step = lim; if (step < -lim) step = -lim; pend -= step;
         float ts = *(float *)(c + 0x7EC); if (ts < 0.001f) ts = 1.0f; *(float *)(c + 0x5F8) = step / (ts * dt);
         {   /* Milestone 95 probe: the mouse backlog (rad x1000), the game's turn speed, the input set, and how far the aim really turned since last time */
@@ -472,8 +539,63 @@ void mouse_apply(u8 *c) {
            sprinting, when it eases up to ~55 degrees so the aim IK raises the gun. The camera is built from the view pitch. */
         extern float g_view_pitch, g_sprint_t, g_pose_t; extern u32 g_sprinting; static u32 vinit; static u8 *vc;
         if (!vinit || vc != c) { vinit = 1; vc = c; g_view_pitch = *(float *)(c + 0x5F4); }
-        g_view_pitch += (float)(-dy * g_pitch_sign) * k; if (g_view_pitch > 1.047f) g_view_pitch = 1.047f; if (g_view_pitch < -1.047f) g_view_pitch = -1.047f;
-        float st = dt * 6.0f; if (st > 1) st = 1; static u32 nogunup = 2; if (nogunup == 2) nogunup = GetFileAttributesA("gunup.txt") == 0xFFFFFFFF;   /* opt-in: the run animation ignores the aim pitch, so this did not raise the gun */
+        g_view_pitch += (float)(-dy * g_pitch_sign) * k;
+        {   /* zoom on our camera: zoomed in, our camera's eye eases from the shoulder to the scope's eye (cam_build), its direction stays ours.
+               On zoom-in the view eases onto the world point that was under the reticle (pitch: g_view_pitch; yaw: the camera's own yaw,
+               g_cam_yaw, with Flint turning after it); zooming out eases back to where the reticle was. noscopepoint.txt = the plain lift only */
+            extern float g_hip_p11; int reticle_world(float *T); extern float atan2_ext(float, float);
+            static int wz; static float lift_t, lift_a, RT[3], ygoal, zm, base_y, yoff_t; static u32 rt_t, ya_t; const float ysign = 1.0f;
+            u32 nw = GetTickCount(); int z; { static u32 zon_t; if (scoped()) { z = 1; zon_t = nw; } else z = wz && nw - zon_t < 150; }   /* a zoom-out counts after 0.15 s off: a flickering zoom flag
+                (or the special check) re-ran zoom-in / zoom-out every few frames - the pitch sawtooth (shake) while zoomed in a special */
+            float P_[3], R_[3], F_[3]; char_basis(c, P_, R_, F_); float cy = atan2_ext(F_[0], F_[2]);
+            float ease = dt * 10.0f; if (ease > 1.0f) ease = 1.0f;
+            float mraw = (float)(dx * g_yaw_sign) * k;
+            {   /* which way the turn queue turns Flint's yaw (this yaw convention): learnt from mouse turns outside the zoom */
+                static float pcy, pm, corr; static int have; if (have && !z) { float d = cy - pcy; while (d > 3.14159f) d -= 6.28318f; while (d < -3.14159f) d += 6.28318f; if (pm > 0.003f || pm < -0.003f) corr += pm * d; if (corr > 1.0f) corr = 1.0f; if (corr < -1.0f) corr = -1.0f; }
+                pcy = cy; pm = mraw; have = 1; g_turn_sgn = corr < 0 ? -1.0f : 1.0f; }
+            float mang = mraw * g_turn_sgn * ysign;   /* the mouse's turn this frame (radians of yaw) */
+            if (!z) { float T[3]; if (reticle_world(T)) { RT[0] = T[0]; RT[1] = T[1]; RT[2] = T[2]; rt_t = nw | 1; } }
+            if (z && !wz) {   /* zoom in */
+                base_y = cy; zm = 0; ygoal = cy;
+                float t = (50.0f / 240.0f) / g_hip_p11; float W = (g_view_pitch - lift_a) + (t - t * t * t / 3.0f);
+                if (rt_t && nw - rt_t < 1000 && fattr_cached("noscopepoint.txt") == 0xFFFFFFFF) {
+                    float E[3], D[3]; for (int q = 0; q < 3; q++) E[q] = P_[q] + R_[q] * g_sc_off[0] + (q == 1 ? g_sc_off[1] : 0.0f) + F_[q] * g_sc_off[2];
+                    for (int q = 0; q < 3; q++) D[q] = RT[q] - E[q]; float h = sqrt_(D[0] * D[0] + D[2] * D[2]);
+                    if (h > 1.0f) { W = atan2_ext(D[1], h); float yg = atan2_ext(D[0], D[2]), d = yg - cy; while (d > 3.14159f) d -= 6.28318f; while (d < -3.14159f) d += 6.28318f; if (d < 0.3f && d > -0.3f) ygoal = cy + d; } }
+                lift_t = W - (g_view_pitch - lift_a); if (lift_t > 0.4f) lift_t = 0.4f; if (lift_t < -0.4f) lift_t = -0.4f;
+                yoff_t = ygoal - cy; g_cam_yaw = cy; g_yaw_own = 1;
+                static u32 nl; if (nl++ < 20) { out("  [zoom] in: pitch lift mrad "); fo(lift_t); out("yaw mrad "); fo(ygoal - cy); out("\r\n"); } }
+            if (!z && wz) {   /* zoom out: back to the shoulder view, turned back so the reticle lands where it was */
+                g_yaw_off = g_cam_yaw + g_yaw_off - cy; while (g_yaw_off > 3.14159f) g_yaw_off -= 6.28318f; while (g_yaw_off < -3.14159f) g_yaw_off += 6.28318f;
+                g_yaw_own = 0; lift_t = 0; yoff_t = 0; }   /* back on Flint's yaw from where the camera is, eased */
+            if (z) { zm += mang; g_cam_yaw += mang; }
+            {   float dl = (lift_t - lift_a) * ease; lift_a += dl; g_view_pitch += dl; }   /* the pitch eases (both ways) */
+            if (lock_mode()) { yoff_t = 0; g_yaw_off = 0; g_yaw_own = 0; }   /* in a special the lock steers: no zoom yaw offset (it came back in the frames the lock dropped: shake) */
+            g_yaw_off += (yoff_t - g_yaw_off) * ease; if (yoff_t == 0.0f && g_yaw_off < 0.0005f && g_yaw_off > -0.0005f) g_yaw_off = 0.0f;   /* eased both ways; the mouse turns Flint and the camera together */
+            if (g_yaw_own && !*(u32 *)(c + 0x604) && !*(u32 *)(c + 0x638) && fattr_cached("noflintfollow.txt") == 0xFFFFFFFF) {   /* zoomed: Flint turns after the camera,
+                    a third of the gap per frame (no overshoot), so the game's own aim, its red reticle and its hit ray follow the crosshair */
+                float er = g_cam_yaw + g_yaw_off - cy; while (er > 3.14159f) er -= 6.28318f; while (er < -3.14159f) er += 6.28318f; if (er < 0.5f && er > -0.5f) pend = er * g_turn_sgn * 0.35f; }
+            wz = z; }
+        u8 *lock_target(void); u8 *lt_ = lock_target();
+        { extern float g_lockcam_yaw, g_lockcam_pitch; extern int g_lockcam_on;
+          if (lt_ && g_lockcam_on && fattr_cached("locksteer.txt") == 0xFFFFFFFF) {   /* Flint follows the lock camera: a third of the gap per frame */
+            extern float atan2_ext(float, float); float P_[3], R_[3], F_[3]; char_basis(c, P_, R_, F_); float er = g_lockcam_yaw - atan2_ext(F_[0], F_[2]);
+            while (er > 3.14159f) er -= 6.28318f; while (er < -3.14159f) er += 6.28318f; if (!*(u32 *)(c + 0x604) && !*(u32 *)(c + 0x638) && er < 1.0f && er > -1.0f) pend = er * g_turn_sgn * 0.6f;
+            g_view_pitch += (g_lockcam_pitch - g_view_pitch) * 0.6f; } }
+        if (lt_ && char_is(lt_) && fattr_cached("locksteer.txt") != 0xFFFFFFFF) {   /* locked: Flint (and the camera with her) turned at the target, so it stays
+                in front and centred: yaw through the turn queue (a third of the gap per frame), pitch eased */
+            extern float atan2_ext(float, float); float P_[3], R_[3], F_[3]; char_basis(c, P_, R_, F_); float *x = char_xf(lt_);
+            float v[3] = {x[9] - P_[0], x[10] + 0.35f - (P_[1] + 0.7f), x[11] - P_[2]}, h = sqrt_(v[0] * v[0] + v[2] * v[2]);
+            if (h > 0.5f) { float er = atan2_ext(v[0], v[2]) - atan2_ext(F_[0], F_[2]); while (er > 3.14159f) er -= 6.28318f; while (er < -3.14159f) er += 6.28318f;
+                static u8 *gt_; static u32 gt0; u32 gn = GetTickCount(); if (gt_ != lt_) { gt_ = lt_; gt0 = gn; } float ramp = (gn - gt0) / 300.0f; if (ramp > 1.0f) ramp = 1.0f;   /* a new lock: the turn eases in (the game swings too: together they overshot) */
+                /* moving targets: the target's own yaw rate (its bearing's change since last frame) is added, so Flint keeps pace instead of trailing */
+                static float pby; static u8 *pbt; float by = atan2_ext(v[0], v[2]), ff = 0; if (pbt == lt_) { ff = by - pby; while (ff > 3.14159f) ff -= 6.28318f; while (ff < -3.14159f) ff += 6.28318f; if (ff > 0.2f || ff < -0.2f) ff = 0; } pby = by; pbt = lt_;
+                if (!*(u32 *)(c + 0x604) && !*(u32 *)(c + 0x638)) pend = (er * (0.12f + 0.43f * ramp) + ff) * g_turn_sgn;   /* stronger (user): up to 0.55 of the gap per frame */
+                float wp = atan2_ext(v[1], h); static float wps; static u8 *wpt; if (wpt != lt_) { wpt = lt_; wps = g_view_pitch; }
+                { static float pwp; static u8 *pwt; float fp = (pwt == lt_) ? wp - pwp : 0; if (fp > 0.1f || fp < -0.1f) fp = 0; pwp = wp; pwt = lt_; wps += (wp - wps) * 0.15f + fp; }
+                g_view_pitch += (wps - g_view_pitch) * 0.45f; } }   /* the target pitch filtered (~0.2 s): Flint's and the target's bobbing made it twitch (zoomed shake) */
+        if (g_view_pitch > 1.047f) g_view_pitch = 1.047f; if (g_view_pitch < -1.047f) g_view_pitch = -1.047f;
+        float st = dt * 6.0f; if (st > 1) st = 1; static u32 nogunup = 2; if (nogunup == 2) nogunup = fattr_cached("gunup.txt") == 0xFFFFFFFF;   /* opt-in: the run animation ignores the aim pitch, so this did not raise the gun */
         g_sprint_t += ((g_sprinting && !nogunup ? 1.0f : 0.0f) - g_sprint_t) * st;
         { extern float g_pose_t, g_held_base; int heavy = g_held_base > 0.68f;   /* measured: minigun 0.78-0.81 m, Regen 0.39-0.59 m (picked mid-switch) */   /* Milestone 97: a heavy gun carried low (the RVG-50 minigun) keeps the game's own run animation (user) */
           int sp = g_sprinting && !heavy; float pt = dt * (sp ? 8.0f : 25.0f); if (pt > 1) pt = 1; g_pose_t += ((sp ? 1.0f : 0.0f) - g_pose_t) * pt; if (!sp && g_pose_t < 0.02f) g_pose_t = 0; }   /* eases in over ~0.3 s, out over ~0.1 s */
@@ -485,7 +607,7 @@ void mouse_apply(u8 *c) {
         /* Writing the transform made him spin; the body's heading is +0x434 (radians 0..2pi, body yaw = pi - heading), its target +0x4A0.
            Walking, the game sets the target from the aim; standing, it leaves both until the gap is large. Both are set from the aim. */
         /* that froze him (standing turns are turn-in-place motions driven from these); kept opt-in only: bodyhead.txt */
-        static u32 off = 2, tl; u32 nw = GetTickCount(); if (nw - tl > 1000) { tl = nw; off = GetFileAttributesA("bodyhead.txt") == 0xFFFFFFFF; }
+        static u32 off = 2, tl; u32 nw = GetTickCount(); if (nw - tl > 1000) { tl = nw; off = fattr_cached("bodyhead.txt") == 0xFFFFFFFF; }
         if (!off && !*(u32 *)(c + 0x604) && !*(u32 *)(c + 0x638)) { float *A = (float *)(c + 0x5BC); extern float atan2_ext(float, float);
             float h = 3.14159265f - atan2_ext(A[6], A[0]); while (h < 0) h += 6.2831853f; while (h >= 6.2831853f) h -= 6.2831853f;
             *(float *)(c + 0x434) = h; *(float *)(c + 0x4A0) = h; } }
@@ -507,11 +629,110 @@ __attribute__((naked)) static void move_stub(void) { __asm__ volatile(
    pick-up / reload button): then the game sees it as usual and the weapon under the player is picked up. */
 extern u32 g_last_pad[3];
 static int x_held(void) { return ((g_last_pad[1] >> 16) & 255) > 30; }
-u32 aim_is_character(u32 t) { (void)t; return !x_held(); }   /* lock-on: cleared (1) unless X is held */
-static u32 g_rt;   /* the reticle's object as the game had it (before it is hidden) */
+/* special abilities (Flint's auto-lock): the lock-on and reticle targets are let through for 90 s after the special (White) is pressed
+   (where the game keeps 'special active' is not known yet). nospeciallock.txt = blank them as before. */
+/* special-state probe (always on until found): snapshots of the player character's first 0x1800 bytes; on each press of the
+   special (White) the snapshot from just before is compared with the state 1.5 s later, and every 32-bit field that changed to a
+   small integer value (flags, states) is logged; pressing again shows which flip back. -> [special] lines in bfloader.log */
+static void special_probe(void) {
+    static u8 snap[0x1800], before[0x1800]; static u32 tsnap, tpress, was, n; u8 *c = (u8 *)g_player_char; u32 now = GetTickCount();
+    if (!c || !readable(c, 0x1800) || n >= 24) return;
+    u32 w = ((g_last_pad[2] >> 8) & 255) > 30;
+    if (w && !was) { for (u32 i = 0; i < 0x1800; i++) before[i] = snap[i]; tpress = now | 1; }
+    was = w;
+    if (tpress && now - tpress > 1500) { tpress = 0; n++; out("  [special] press "); dec(n); out(" changed small fields:");
+        u32 k = 0; for (u32 o = 0; o < 0x1800 && k < 40; o += 4) { u32 a = *(u32 *)(before + o), b = *(u32 *)(c + o); if (a != b && a < 0x10000 && b < 0x10000) { out(" +"); hex(o); out(" "); dec(a); out(">"); dec(b); k++; } }
+        out("\r\n  [special] press "); dec(n); out(" floats that went down (x1000):"); k = 0;   /* an energy amount draining while the special is on */
+        for (u32 o = 0; o < 0x1800 && k < 40; o += 4) { float a = *(float *)(before + o), b = *(float *)(c + o); if (a > 0.001f && a < 100000.0f && b < a && b > -1.0f && a - b < a * 0.9f && a - b > a * 0.0005f) { out(" +"); hex(o); out(" "); dec((u32)(a * 1000)); out(">"); dec((u32)(b * 1000)); k++; } }
+        out("\r\n"); }
+    if (now - tsnap > 200) { tsnap = now; for (u32 i = 0; i < 0x1800; i++) snap[i] = c[i]; } }
+static u32 g_special_drain_ms;
+static int special_on(void) {   /* the special is on while its energy (player character +0x490, a float, 100 = full) is draining (found by probe) */
+    static u32 tl, off, drain_ms; static float last = -1; static void *lastc; u32 now = GetTickCount();
+    if (now - tl > 1000) { tl = now; off = fattr_cached("nospeciallock.txt") != 0xFFFFFFFF; }
+    u8 *c = (u8 *)g_player_char; if (off || !c || !readable(c + 0x490, 4)) return 0;
+    float e = *(float *)(c + 0x490); if ((void *)c != lastc) { lastc = c; last = e; drain_ms = 0; }
+    if (e < last - 0.0001f) drain_ms = now | 1; last = e;
+    { static u32 tlog, nlog; if (now - tlog > 500 && nlog < 400) { tlog = now; nlog++; out("  [energy] char "); hex((u32)c); out(" x1000 "); dec((u32)(e * 1000 + 0.5f)); out(drain_ms && now - drain_ms < 1500 ? " ON" : ""); out(" white "); dec(((g_last_pad[2] >> 8) & 255) > 30); out("\r\n"); } }
+    g_special_drain_ms = drain_ms; return drain_ms && now - drain_ms < 1500; }   /* (the energy drops in steps, not every frame) */
+static int special_steady(void) { special_on(); return g_special_drain_ms && GetTickCount() - g_special_drain_ms < 3000; }
+static int special_hold(void) {   /* for the lock-on: the special counts as on through energy-step gaps (2.2 s) and from the moment White is pressed
+    (the energy only starts dropping a moment later); the flickering check cleared the target the game was locking onto */
+    static u32 tw; u32 now = GetTickCount(); if (((g_last_pad[2] >> 8) & 255) > 30) tw = now | 1;
+    special_on(); return (g_special_drain_ms && now - g_special_drain_ms < 2200) || (tw && now - tw < 1500); }
+u32 g_t16;   /* when the game last had its targeting object (type 16) as the reticle object: only lock-on specials (Flint's) make it */
+extern u32 g_cand_seen; static u32 g_arch_lock[8], g_arch_no[8];   /* character types whose special locks onto characters (Flint) / does not (Tex's Berserker: aim assist yanked the aim) */
+static void arch_add(u32 *l, u32 a) { for (int i = 0; i < 8; i++) { if (l[i] == a) return; if (!l[i]) { l[i] = a; return; } } }
+static int arch_in(const u32 *l, u32 a) { for (int i = 0; i < 8; i++) if (l[i] == a) return 1; return 0; }
+static int lock_mode(void) { u32 now = GetTickCount(); if (fattr_cached("noflintlock.txt") != 0xFFFFFFFF) return 0;   /* (user, Nov 21) the Flint lock-on fix is off for now: flintlock.txt = on */
+    if (!(special_hold() && g_t16 && now - g_t16 < 1500)) return 0;
+    u8 *pc = (u8 *)g_player_char; u32 a = pc && readable(pc + 0xC, 4) ? *(u32 *)(pc + 0xC) : 0; if (!a) return 0;
+    if (arch_in(g_arch_lock, a)) return 1; if (arch_in(g_arch_no, a)) return 0;
+    static u32 ua, ut, uc; if (ua != a || now - ut > 6000) { ua = a; ut = now; uc = g_cand_seen; }   /* unknown: a lock-on special for its first 3 s; no lock by then = not one */
+    if (now - ut > 3000 && g_cand_seen - uc < 30) { ut = now - 2000; uc = g_cand_seen; }   /* no enemies offered yet: keep waiting */
+    if (now - ut > 3000) { arch_add(g_arch_no, a); out("  [special] this character's special does not lock on: no lock-on handling\r\n"); return 0; } return 1; }   /* a lock-on special: other characters' specials
+    (Tex's, ...) got the lock's mouse lock-out, steering, smoothing and sprint ban */
+int lock_mode_ext(void) { return lock_mode(); }
+int special_steady_ext(void) { return special_steady(); }   /* for the camera: a short gap between energy steps moved it back and forth (screen shake) */
+static u32 g_lock_ms;   /* when the game last had a lock-on target (during a special) */
+static int locked_now(void) { return g_lock_ms && GetTickCount() - g_lock_ms < 300; }
+static u32 g_lock_t;   /* the lock-on target the game offered during a special */
+u32 aim_is_character(u32 t) { int sp = lock_mode(); if (t) cand_add((u8 *)t); if (t && sp) { g_lock_ms = GetTickCount() | 1; g_lock_t = t; } return !x_held() && !sp; }   /* lock-on: cleared (1) unless X is held or a special is on */
+u32 g_rt;   /* the reticle's object as the game had it (before it is hidden) */
+static int lock_char_now(void) { extern u8 *g_forced; if (!lock_mode()) return 0; u8 *r = (u8 *)g_rt; if (!r || !readable(r + 0x5D0, 4)) return 0;   /* the targeting object's +0x5D0: the locked character */
+    /* (a swiped-to target is used through lock_target; nothing is written into the game's lock any more - that froze it) */
+    u8 *q = *(u8 **)(r + 0x5D0); if (!q || q == (u8 *)g_player_char || !readable(q, 0x10)) return 0; u8 *k = *(u8 **)(q + 0xC); int ok = k && readable(k, 8) && *(u32 *)(k + 4) == 3;
+    if (ok) { u8 *pc = (u8 *)g_player_char; if (pc && readable(pc + 0xC, 4)) { u32 a = *(u32 *)(pc + 0xC); if (!arch_in(g_arch_lock, a)) { arch_add(g_arch_lock, a); out("  [special] this character's special locks on\r\n"); } } } return ok; }
+static int lock_char(void) {   /* held through gaps under 0.5 s: the lock flickered (energy steps, the target dropping out for a frame) and each flip
+                                  handed the aim between the game's steering and the mouse - the jitter while walking. A special's end still ends it */
+    static u32 last; u32 now = GetTickCount(); if (!lock_mode()) { last = 0; return 0; }   /* from the White press: the energy only starts dropping later (the start of a lock fought the mouse) */   /* 2.2 s: past the energy-step gaps, short of the 3 s camera window */
+    if (lock_char_now()) last = now | 1; return last && now - last < 500; }
 static int interact_target(void) { u32 t = g_rt; if (!t || !readable((void *)t, 0x10)) return 0;   /* something under the reticle that is not a character */
     u32 c = *(u32 *)(t + 0xC); if (c && readable((void *)c, 8) && *(u32 *)(c + 4) == 3) return 0; return 1; }
-u32 aim_reticle_keep(u32 t) { g_rt = t; return x_held() && g_x_src != 1 ? t : 0; }
+/* the target the camera and the shots use: the game's lock (+0x5D0) held through its flips between nearby characters (it switched every
+   few frames: the camera swung, shots split). Changes only when the game has wanted another for 0.8 s, or by a swipe. Nothing is written to
+   the game (writing the held one back froze it once). nostickylock.txt = the game's choice each frame */
+int body_center(u8 *q, float *o) {   /* the middle of a character's body: the mean of its body parts' positions (part objects 0x80 apart; the
+    one at +0x3F8 is part 56, as for the player's skeleton), only parts within 3 m of the character. Tall, floating or fallen characters were shot over */
+    if (!char_is(q) || !readable(q + 0x3F8, 4)) return 0; u32 lh = *(u32 *)(q + 0x3F8); if (lh < 0x80000000u + 56 * 0x80) return 0;
+    u8 *base = (u8 *)(lh - 56 * 0x80); float *x = char_xf(q), s3[3] = {0, 0, 0}; int n = 0;
+    for (int i = 0; i < 90; i++) { u8 *p = base + i * 0x80; if (!readable(p + 0x38, 12)) break; float *P = (float *)(p + 0x38);
+        float dx = P[0] - x[9], dy = P[1] - x[10], dz = P[2] - x[11]; if (dx * dx + dy * dy + dz * dz > 9.0f || P[0] != P[0]) continue; s3[0] += P[0]; s3[1] += P[1]; s3[2] += P[2]; n++; }
+    if (n < 5) return 0; for (int k = 0; k < 3; k++) o[k] = s3[k] / n; return 1; }
+static int lock_in_range(u8 *q) { u8 *pc = (u8 *)g_player_char; if (!pc || !q) return 0; float *a = char_xf(q), *b = char_xf(pc); float dx = a[9] - b[9], dy = a[10] - b[10], dz = a[11] - b[11];
+    return dx * dx + dy * dy + dz * dz < 45.0f * 45.0f; }   /* the hard lock's range */
+u32 g_mouse_move_t;   /* when the mouse last moved (mouse_apply): mouse input stops the lock (user) */
+static int lock_valid(u8 *q) { extern float g_eye_ours[3], g_cb[3]; if (!char_is(q) || !lock_in_range(q)) return 0; float *x = char_xf(q);
+    float v[3] = {x[9] - g_eye_ours[0], x[10] - g_eye_ours[1], x[11] - g_eye_ours[2]}, l = sqrt_(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); if (l < 0.5f) return 1;
+    return -(v[0] * g_cb[0] + v[1] * g_cb[1] + v[2] * g_cb[2]) / l > 0.35f; }   /* alive, within 45 m, in front of the camera (~70 degrees) */
+static u8 *lock_target_old(void);
+static u8 *lock_target_(void) {   /* (user, Nov 21) the lock: the nearest valid character while the mouse is still; any mouse movement stops it.
+    Kept until it dies, leaves range or view, or the mouse moves. oldlock.txt = the hard lock with swipes */
+    if (fattr_cached("oldlock.txt") != 0xFFFFFFFF) return lock_target_old();
+    static u8 *cur; u32 now = GetTickCount();
+    if (!lock_mode() || now - g_mouse_move_t < 400) { cur = 0; return 0; }
+    if (cur && lock_valid(cur)) return cur;
+    u8 *best = 0; float bd = 1e9f, *pp = g_player_char ? char_xf((u8 *)g_player_char) : 0; if (!pp) return 0;
+    u8 *r = (u8 *)g_rt; u8 *qg = (r && readable(r + 0x5D0, 4)) ? *(u8 **)(r + 0x5D0) : 0;
+    for (int i = -1; i < 16; i++) { u8 *q = i < 0 ? qg : g_cand[i]; if (!q || (i >= 0 && now - g_cand_t[i] > 2000) || !lock_valid(q)) continue;
+        float *x = char_xf(q), d = (x[9] - pp[9]) * (x[9] - pp[9]) + (x[10] - pp[10]) * (x[10] - pp[10]) + (x[11] - pp[11]) * (x[11] - pp[11]); if (d < bd) { bd = d; best = q; } }
+    cur = best; return cur; }
+static u8 *lock_target_old(void) { extern u8 *g_forced; static u8 *last_t; static u32 last_ok; u32 n0 = GetTickCount();
+    if (!lock_char()) { if (lock_mode() && last_t && n0 - last_ok < 1000 && char_is(last_t)) return last_t; return 0; }   /* rides through lock dropouts (the camera sawtoothed) */
+    if (g_forced && char_is(g_forced)) {   /* a swiped-to target: kept until the game has wanted another for 3 s (dead / out of reach) */
+        static u32 fd_t; u8 *r0 = (u8 *)g_rt; u8 *qg0 = (r0 && readable(r0 + 0x5D0, 4)) ? *(u8 **)(r0 + 0x5D0) : 0;
+        (void)qg0; (void)fd_t; if (!lock_in_range(g_forced)) g_forced = 0;   /* hard lock: kept until it dies, leaves range or the next swipe */
+        if (g_forced) { last_t = g_forced; last_ok = n0; return g_forced; } }
+    u8 *r = (u8 *)g_rt; u8 *qg = (r && readable(r + 0x5D0, 4)) ? *(u8 **)(r + 0x5D0) : 0; if (!char_is(qg)) qg = 0;
+    static u8 *held; static u32 diff_t; u32 nw = GetTickCount();
+    if (fattr_cached("nostickylock.txt") != 0xFFFFFFFF) return qg;
+    if (held && char_is(held) && lock_in_range(held)) { last_t = held; last_ok = nw; (void)diff_t; return held; }   /* hard lock (user): only death, out of range (45 m) or a swipe ends it */
+    held = qg; diff_t = 0; if (held) { last_t = held; last_ok = nw; } return held; }
+u8 *lock_target(void) { u8 *t = lock_target_(); extern u8 *g_cover_block_tg; extern u32 g_cover_block_until; extern u8 *g_forced;
+    if (t && t == g_cover_block_tg && (s32)(g_cover_block_until - GetTickCount()) > 0 && fattr_cached("coverunlock.txt") != 0xFFFFFFFF) { if (g_forced == t) g_forced = 0; return 0; }
+    return t; }
+u32 aim_reticle_keep(u32 t) { g_rt = t; if (t > 0x10000 && readable((void *)(t + 0xC), 4)) { u32 k = *(u32 *)(t + 0xC); if (k > 0x10000 && readable((void *)(k + 4), 4) && *(u32 *)(k + 4) == 16) g_t16 = GetTickCount() | 1; }
+    return (x_held() && g_x_src != 1) || lock_mode() ? t : 0; }
 __attribute__((naked)) static void lock_stub1(void) { __asm__ volatile(
     "incl _g_lock_calls\n\t cmpl _g_player_char, %ebx\n\t jne 2f\n\t cmpl $0, _g_mouse_on\n\t je 2f\n\t testl %edi, %edi\n\t jz 2f\n\t"
     "pushal\n\t pushl %edi\n\t call _aim_is_character\n\t addl $4, %esp\n\t testl %eax, %eax\n\t popal\n\t jz 2f\n\t"   /* (popal leaves the flags alone) */
@@ -537,7 +758,7 @@ extern u32 g_aiming; float *render_consts(void); float g_eye_ours[3];
    its follow camera, which lags far behind on fast turns: nearby ground counted as far away and was drawn in full fog
    colour ("textures disappearing"). render.c swaps any constant equal to the follow camera's eye for ours. */
 float g_eye_follow[3], g_eye_follow_prev[3]; u32 g_eye_swap;
-static int GetFileAttributesA_cached_camoffset(void) { static int v = 2; if (v == 2) v = GetFileAttributesA("gamecamera.txt") == 0xFFFFFFFF; return v; }   /* our camera by default; gamecamera.txt = the game's own */
+static int GetFileAttributesA_cached_camoffset(void) { static int v = 2; if (v == 2) v = fattr_cached("gamecamera.txt") == 0xFFFFFFFF; return v; }   /* our camera by default; gamecamera.txt = the game's own */
 /* Division-style camera (Milestone 87): right after FollowCamera_Update, the camera node (camera +0x48, vfunc +0x14:
    3x4 view, rows = camera right, up, back; translation = view space) is rebuilt from the player:
    - rotation = the character's aim matrix (+0x5BC) transposed: one shared yaw (and pitch) for camera and character,
@@ -550,21 +771,90 @@ static float g_cam_state[3] = {3.6f, 1.0f, 0.5f};   /* distance, height, shoulde
 float g_cr[3], g_cu[3], g_cb[3]; u32 g_ourcam = 1; float g_view_pitch, g_sprint_t, g_pose_t;   /* our camera axes (right, up, back), set in cam_build */
 static void cam_build(u8 *cam) {
     u8 *c = (u8 *)g_player_char; if (!c || *(u8 **)(cam + 0x148) != c) return;
-    static u32 camtest = 2; if (camtest == 2) camtest = GetFileAttributesA("camtest.txt") != 0xFFFFFFFF;
+    static u32 camtest = 2; if (camtest == 2) camtest = fattr_cached("camtest.txt") != 0xFFFFFFFF;
     if (!g_mouse_on && !camtest) return;
     {   int blk_has_rot(u8 *); u8 *cam_block(u8 *); extern u32 g_ourcam; g_ourcam = blk_has_rot(cam_block(cam));
         if (!g_ourcam) return; }   /* Milestone 91: a squad member taken over after a death keeps the game's camera (its layout differs) */
+    if (scoped() && !special_steady() && fattr_cached("gamescope.txt") != 0xFFFFFFFF) {   /* (opt-in, gamescope.txt) zoomed in: the game's own scope camera (our shoulder camera sat
+           4.4 m behind the gun; the game's scoped shot flies parallel to the view from the muzzle and landed low-left, magnified by the zoom) */
+        {   static u32 lastsc; u32 n0 = GetTickCount(); if (n0 - lastsc > 200) for (int k = 0; k < 3; k++) { g_hip_E[k] = g_eye_ours[k]; g_hip_F[k] = -g_cb[k]; } lastsc = n0; }   /* the shoulder view, on the first scoped frame */
+        float *nd = ((float *(__thiscall *)(void *))(*(u32 **)(cam + 0x48))[0x14 / 4])(cam + 0x48);
+        for (int k = 0; k < 3; k++) { g_cr[k] = nd[k]; g_cu[k] = nd[3 + k]; g_cb[k] = nd[6 + k]; g_eye_ours[k] = -(nd[k] * nd[9] + nd[3 + k] * nd[10] + nd[6 + k] * nd[11]); }
+        static u32 ns; if (ns++ < 3) out("  [cam] scoped: the game's scope camera\r\n");
+        {   u32 nw = GetTickCount(); float P[3], R[3], F[3]; char_basis(c, P, R, F);
+            if (g_zoom_t && nw - g_zoom_t > 900 && !g_sc_phase) {   /* settled: learn the eye's place */
+                float d[3] = {g_eye_ours[0] - P[0], g_eye_ours[1] - P[1], g_eye_ours[2] - P[2]};
+                g_sc_off[0] = d[0] * R[0] + d[2] * R[2]; g_sc_off[1] = d[1]; g_sc_off[2] = d[0] * F[0] + d[2] * F[2];
+                if (!g_sc_have) { out("  [scope] learnt the scope eye (right, up, forward mm) "); fo(g_sc_off[0]); fo(g_sc_off[1]); fo(g_sc_off[2]); out("\r\n"); } g_sc_have = 1; }
+            if (!g_sc_phase && !g_zoom_t && g_sc_have && fattr_cached("noscopesnap.txt") == 0xFFFFFFFF) {   /* the zoom's first frame (the glide starts
+                   on the next): the shoulder view stays, not the game's raw scope camera for one frame (it flashed ~8 degrees low) */
+                float *Eh = g_hip_E, *Fh = g_hip_F, fx = Fh[0], fz = Fh[2], hl = sqrt_(fx * fx + fz * fz); if (hl > 1e-4f) { fx /= hl; fz /= hl;
+                    float U[3] = {-fx * Fh[1], hl, -fz * Fh[1]}, Rv[3] = {Fh[1] * U[2] - Fh[2] * U[1], Fh[2] * U[0] - Fh[0] * U[2], Fh[0] * U[1] - Fh[1] * U[0]};
+                    if (Rv[0] * nd[0] + Rv[1] * nd[1] + Rv[2] * nd[2] < 0) { Rv[0] = -Rv[0]; Rv[1] = -Rv[1]; Rv[2] = -Rv[2]; }
+                    for (int k = 0; k < 3; k++) { nd[k] = Rv[k]; nd[3 + k] = U[k]; nd[6 + k] = -Fh[k]; g_cr[k] = Rv[k]; g_cu[k] = U[k]; g_cb[k] = -Fh[k]; g_eye_ours[k] = Eh[k]; }
+                    nd[9] = -(Rv[0] * Eh[0] + Rv[1] * Eh[1] + Rv[2] * Eh[2]); nd[10] = -(U[0] * Eh[0] + U[1] * Eh[1] + U[2] * Eh[2]); nd[11] = (Fh[0] * Eh[0] + Fh[1] * Eh[1] + Fh[2] * Eh[2]); } }
+            if (g_sc_phase) {   /* one continuous move: glide to the final view, hold it, blend into the game's camera */
+                extern float atan2_ext(float, float); g_game_F[0] = -nd[6]; g_game_F[1] = -nd[7]; g_game_F[2] = -nd[8]; float gF[3] = {-nd[6], -nd[7], -nd[8]}, gE[3] = {g_eye_ours[0], g_eye_ours[1], g_eye_ours[2]}, Ff[3], E[3], Fd[3]; int write = 1;
+                {   float fx = g_sc_D[0], fz = g_sc_D[2], hl = sqrt_(fx * fx + fz * fz); if (hl < 1e-4f) hl = 1e-4f; fx /= hl; fz /= hl;
+                    float pv = atan2_ext(g_sc_D[1], hl) + g_sc_dp, cp, sp; __asm__("fcos" : "=t"(cp) : "0"(pv)); __asm__("fsin" : "=t"(sp) : "0"(pv)); Ff[0] = fx * cp; Ff[1] = sp; Ff[2] = fz * cp; }
+                u32 t = nw - g_sc_t0;
+                if (g_sc_phase == 1) {
+                    if (t < 150) { float a = t / 150.0f; a = a * a * (3.0f - 2.0f * a); for (int k = 0; k < 3; k++) { E[k] = g_hip_E[k] + (g_sc_E[k] - g_hip_E[k]) * a; Fd[k] = g_hip_F[k] + (Ff[k] - g_hip_F[k]) * a; } }
+                    else { for (int k = 0; k < 3; k++) { E[k] = g_sc_E[k]; Fd[k] = Ff[k]; }
+                        float dv = gF[0] * Ff[0] + gF[1] * Ff[1] + gF[2] * Ff[2], de = sqrt_((gE[0] - g_sc_E[0]) * (gE[0] - g_sc_E[0]) + (gE[1] - g_sc_E[1]) * (gE[1] - g_sc_E[1]) + (gE[2] - g_sc_E[2]) * (gE[2] - g_sc_E[2]));
+                        if ((t > 350 && dv > 0.99998f && de < 0.1f) || t > 1500) { g_sc_phase = 2; g_sc_t1 = nw;
+                            static u32 nl; if (nl++ < 20) { out("  [scope] hold ms "); dec(t); out(t > 1500 ? " (timed out)" : " (matched)"); out(" angle mrad "); fo(sqrt_(2.0f * (1.0f - (dv < 1.0f ? dv : 1.0f)))); out("eye mm "); fo(de); out("\r\n"); } } } }
+                if (g_sc_phase == 2) { float b = (nw - g_sc_t1) / 150.0f; if (b >= 1.0f) { g_sc_phase = 0; write = 0; }
+                    else { b = b * b * (3.0f - 2.0f * b); for (int k = 0; k < 3; k++) { E[k] = g_sc_E[k] + (gE[k] - g_sc_E[k]) * b; Fd[k] = Ff[k] + (gF[k] - Ff[k]) * b; } } }
+                if (write) { float fl = sqrt_(Fd[0] * Fd[0] + Fd[1] * Fd[1] + Fd[2] * Fd[2]); for (int k = 0; k < 3; k++) Fd[k] /= fl;
+                    float fx = Fd[0], fz = Fd[2], hl = sqrt_(fx * fx + fz * fz); if (hl > 1e-4f) { fx /= hl; fz /= hl;
+                        float Fv[3] = {Fd[0], Fd[1], Fd[2]}, U[3] = {-fx * Fd[1], hl, -fz * Fd[1]}, Rv[3] = {Fv[1] * U[2] - Fv[2] * U[1], Fv[2] * U[0] - Fv[0] * U[2], Fv[0] * U[1] - Fv[1] * U[0]};
+                        if (Rv[0] * nd[0] + Rv[1] * nd[1] + Rv[2] * nd[2] < 0) { Rv[0] = -Rv[0]; Rv[1] = -Rv[1]; Rv[2] = -Rv[2]; }
+                        for (int k = 0; k < 3; k++) { nd[k] = Rv[k]; nd[3 + k] = U[k]; nd[6 + k] = -Fv[k]; g_cr[k] = Rv[k]; g_cu[k] = U[k]; g_cb[k] = -Fv[k]; g_eye_ours[k] = E[k]; }
+                        nd[9] = -(Rv[0] * E[0] + Rv[1] * E[1] + Rv[2] * E[2]); nd[10] = -(U[0] * E[0] + U[1] * E[1] + U[2] * E[2]); nd[11] = (Fv[0] * E[0] + Fv[1] * E[1] + Fv[2] * E[2]); } } } }
+        {   /* probe: does the scope camera follow the aim pitch? 2 s after each zoom-in, every 100 ms: its forward pitch, the aim pitch, ours */
+            static u32 t0, tl, lastf, nz; u32 nw = GetTickCount(); extern float g_view_pitch; if (nw - lastf > 300) { t0 = nw; tl = 0; nz++; } lastf = nw;
+            if (nz <= 12 && nw - t0 < 2000 && nw - tl >= 100) { tl = nw; float fy = -nd[7]; extern float atan2_ext(float, float); float sp = atan2_ext(fy, sqrt_(1.0f - fy * fy));
+                out("  [scopecam] ms "); dec(nw - t0); out(" cam pitch mrad "); fo(sp); out("aim +5F4 "); fo(*(float *)(c + 0x5F4)); out("ours "); fo(g_view_pitch);
+                out("eye "); fo(g_eye_ours[0]); fo(g_eye_ours[1]); fo(g_eye_ours[2]); out("\r\n"); } }
+        return; }
     float *pos = ((float *(__thiscall *)(void *))(*(u32 **)c)[0x40 / 4])(c) + 9;   /* +0x24 */
     float *A = (float *)(c + 0x5BC);   /* columns: right, up, back */
     float r[3] = {A[0], A[3], A[6]}, u[3] = {A[1], A[4], A[7]}, b[3] = {A[2], A[5], A[8]};
     {   /* Milestone 93: rebuild the axes from the character's yaw and our view pitch (the character's own pitch may be raised for the sprint pose) */
         extern float g_view_pitch; float fx = -b[0], fz = -b[2], fl = fx * fx + fz * fz;
-        if (fl > 1e-6f) { float sq; __asm__("fsqrt" : "=t"(sq) : "0"(fl)); fx /= sq; fz /= sq; float pv = g_view_pitch, cp, sp; __asm__("fcos" : "=t"(cp) : "0"(pv)); __asm__("fsin" : "=t"(sp) : "0"(pv));
+        if (fl > 1e-6f) { float sq; __asm__("fsqrt" : "=t"(sq) : "0"(fl)); fx /= sq; fz /= sq; float pv = g_view_pitch, cp, sp;
+            {   /* the lock camera (Flint's special, not zoomed): turns smoothly toward the locked character (the game's lock does not turn
+                   Flint; turning her directly was choppy), eased in from the previous view. nolockcam.txt = off */
+                extern float atan2_ext(float, float); extern float g_lockcam_yaw, g_lockcam_pitch; extern int g_lockcam_on; static float lsy, lsp; static int lon; static s64 llt, lqf;
+                s64 lnw; if (!lqf) QueryPerformanceFrequency(&lqf); QueryPerformanceCounter(&lnw); float ldt = llt ? (float)(lnw - llt) / (float)lqf : 0.0f; llt = lnw; if (ldt > 0.1f) ldt = 0.1f;
+                u8 *lock_target(void); u8 *tq = lock_target();
+                if (tq && char_is(tq) && !scoped() && fattr_cached("nolockcam.txt") == 0xFFFFFFFF) { float *x = char_xf(tq);
+                    float v[3] = {x[9] - pos[0], x[10] + 0.35f - (pos[1] + 1.0f), x[11] - pos[2]}, h = sqrt_(v[0] * v[0] + v[2] * v[2]);
+                    if (h > 1.0f) { float yt = atan2_ext(v[0], v[2]), pt = atan2_ext(v[1], h);
+                        if (!lon) { lon = 1; float hb = sqrt_(g_cb[0] * g_cb[0] + g_cb[2] * g_cb[2]); lsy = atan2_ext(-g_cb[0], -g_cb[2]); lsp = atan2_ext(-g_cb[1], hb); }
+                        float k = ldt * 20.0f; if (k > 1.0f) k = 1.0f; float d = yt - lsy;   /* stronger (user) */ while (d > 3.14159f) d -= 6.28318f; while (d < -3.14159f) d += 6.28318f; lsy += d * k; lsp += (pt - lsp) * k;
+                        float s1, c1; __asm__("fsin" : "=t"(s1) : "0"(lsy)); __asm__("fcos" : "=t"(c1) : "0"(lsy)); fx = s1; fz = c1; pv = lsp;
+                        g_lockcam_yaw = lsy; g_lockcam_pitch = lsp; g_lockcam_on = 1; } }
+                else { lon = 0; g_lockcam_on = 0; } }
+            if (g_yaw_own || g_yaw_off != 0.0f) { extern float atan2_ext(float, float); float yw0 = (g_yaw_own ? g_cam_yaw : atan2_ext(fx, fz)) + g_yaw_off, s1, c1; __asm__("fsin" : "=t"(s1) : "0"(yw0)); __asm__("fcos" : "=t"(c1) : "0"(yw0)); fx = s1; fz = c1; }   /* zoom: the camera's yaw offset from Flint's */
+            {   /* a special's lock-on: the game steers the aim toward the target and, while walking, wobbles about it; the camera follows a
+                   smoothed direction (time constant ~0.12 s) instead of every wobble. The aim itself (shots) is unchanged. nolocksmooth.txt = off */
+                extern float atan2_ext(float, float); static float sy, sp_; static int on; static s64 lt2, qf2; s64 nw2; if (!qf2) QueryPerformanceFrequency(&qf2); QueryPerformanceCounter(&nw2);
+                float dt2 = lt2 ? (float)(nw2 - lt2) / (float)qf2 : 0.0f; lt2 = nw2; if (dt2 > 0.1f) dt2 = 0.1f;
+                float yw = atan2_ext(fx, fz);
+                { static int wl; static u32 lt0; int lk = lock_char() && fattr_cached("locksmooth.txt") != 0xFFFFFFFF;   /* opt-in; only with a locked character (Tex's Berserker also makes the targeting object, has no target: the smoothing flicked on and off - shake) */ u32 nl0 = GetTickCount(); if (lk && !wl) lt0 = nl0; wl = lk; on = on && lk; if (!lk) lt0 = 0;   /* the whole special: the lock flickered every few frames and each flip snapped the camera (shake) */
+                if (lk && fattr_cached("nolocksmooth.txt") == 0xFFFFFFFF) {   /* locked: always smoothed (the game's lock aim shakes about the target) */   /* the lock catching (0.4 s, eased in from the previous view) and zoomed: smoothed */   /* zoomed: the game's tracking wobble is magnified - smoothed */   /* opt-in: the walking jitter was the sprint; smoothing only lagged behind a moving target */
+                    if (!on) { on = 1; extern float g_cb[3]; float hb = g_cb[0] * g_cb[0] + g_cb[2] * g_cb[2]; float sq2; __asm__("fsqrt" : "=t"(sq2) : "0"(hb)); sy = atan2_ext(-g_cb[0], -g_cb[2]); sp_ = atan2_ext(-g_cb[1], sq2); }   /* from the view shown last frame: no snap */
+                    float k = dt2 * (nl0 - lt0 < 250 || scoped() ? 12.0f : 22.0f);   /* faster (user) */ if (k > 1) k = 1; float d = yw - sy; while (d > 3.14159f) d -= 6.28318f; while (d < -3.14159f) d += 6.28318f;
+                    sy += d * k; sp_ += (pv - sp_) * k; pv = sp_; float s1, c1; __asm__("fsin" : "=t"(s1) : "0"(sy)); __asm__("fcos" : "=t"(c1) : "0"(sy)); fx = s1; fz = c1; }
+                else on = 0; } }
+            __asm__("fcos" : "=t"(cp) : "0"(pv)); __asm__("fsin" : "=t"(sp) : "0"(pv));
             float F[3] = {fx * cp, sp, fz * cp}, U[3] = {-fx * sp, cp, -fz * sp};
             float R[3] = {F[1] * U[2] - F[2] * U[1], F[2] * U[0] - F[0] * U[2], F[0] * U[1] - F[1] * U[0]};   /* right = forward x up */
             if (R[0] * r[0] + R[1] * r[1] + R[2] * r[2] < 0) { R[0] = -R[0]; R[1] = -R[1]; R[2] = -R[2]; }   /* keep the game's handedness */
             for (int k = 0; k < 3; k++) { r[k] = R[k]; u[k] = U[k]; b[k] = -F[k]; } } }
-    {   static u32 yt = 2; if (yt == 2) yt = GetFileAttributesA("camyaw.txt") != 0xFFFFFFFF;   /* test: turn the drawn camera 30 degrees about the world up axis */
+    {   static u32 yt = 2; if (yt == 2) yt = fattr_cached("camyaw.txt") != 0xFFFFFFFF;   /* test: turn the drawn camera 30 degrees about the world up axis */
         if (yt) { float cs = 0.8660254f, sn = 0.5f; float R[3], B[3], U[3];
             R[0] = r[0] * cs + r[2] * sn; R[1] = r[1]; R[2] = -r[0] * sn + r[2] * cs; B[0] = b[0] * cs + b[2] * sn; B[1] = b[1]; B[2] = -b[0] * sn + b[2] * cs; U[0] = u[0] * cs + u[2] * sn; U[1] = u[1]; U[2] = -u[0] * sn + u[2] * cs;
             for (int k = 0; k < 3; k++) { r[k] = R[k]; b[k] = B[k]; u[k] = U[k]; } } }
@@ -577,26 +867,95 @@ static void cam_build(u8 *cam) {
     static s64 lt, qf; s64 now; if (!qf) QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&now);
     float dt = lt ? (float)(now - lt) / (float)qf : 0.0f; lt = now; if (dt > 0.1f) dt = 0.1f;
     extern u32 g_sprinting; float goal[3];
-    if (g_aiming && GetFileAttributesA("forceaim.txt") != 0xFFFFFFFF) { goal[0] = 3.2f; goal[1] = 1.0f; goal[2] = 0.5f; }   /* test: wider view of the aim pose */
+    if (g_aiming && fattr_cached("forceaim.txt") != 0xFFFFFFFF) { goal[0] = 3.2f; goal[1] = 1.0f; goal[2] = 0.5f; }   /* test: wider view of the aim pose */
     else if (g_aiming) { goal[0] = 1.6f; goal[1] = 1.15f; goal[2] = 0.65f; } else if (g_sprinting) { goal[0] = 4.2f; goal[1] = 1.15f; goal[2] = 0.45f; } else { goal[0] = 3.6f; goal[1] = 1.0f; goal[2] = 0.5f; }
+    if (special_steady() && fattr_cached("specialcenter.txt") != 0xFFFFFFFF) goal[2] = 0.0f;
+    if (scoped()) { goal[0] = -g_sc_off[2]; goal[1] = g_sc_off[1]; goal[2] = g_sc_off[0]; }   /* zoomed in: the eye eases to the scope's (behind, up, right of Flint's position) */   /* opt-in: centring during the special made the screen shake */   /* a special (Flint's auto-lock): the camera centred behind the
+       character like the game's own, so the game's target box (placed from its camera) lines up; nospecialcenter.txt = stay on the shoulder */
     float ease = dt * 8.0f; if (ease > 1.0f) ease = 1.0f;   /* position only */
     { extern float g_aim_t; float at = dt * 10.0f; if (at > 1.0f) at = 1.0f; g_aim_t += ((g_aiming ? 1.0f : 0.0f) - g_aim_t) * at;
       u32 *pd = gpu_pad(); if (pd) { pd[54] = (u32)((0.8f + 0.45f * (1.0f - g_aim_t)) * 1000.0f); pd[55] = GetTickCount() | 1; } }   /* pad[55]: gameplay heartbeat (the viewer moves the HUD into the corners only in gameplay, not in menus) */   /* hip 1.25, aiming 0.8 */   /* reticle scale for the viewer (Milestone 90) */
     for (int k = 0; k < 3; k++) g_cam_state[k] += (goal[k] - g_cam_state[k]) * ease;
-    float eye[3]; for (int k = 0; k < 3; k++) eye[k] = pos[k] + (k == 1 ? g_cam_state[1] : 0.0f) + r[k] * g_cam_state[2] + b[k] * g_cam_state[0];
-    float eye_want[3] = {eye[0], eye[1], eye[2]}, st_pivot[3] = {pos[0], pos[1] + g_cam_state[1], pos[2]};
+    static float py_s; static u8 *py_c; { float k6 = dt * 12.0f; if (k6 > 1.0f) k6 = 1.0f; float d6 = pos[1] - py_s;   /* the pivot height smoothed (~0.1 s): in specials
+        the character's base position bobbed and the camera bounced with it (18 reversals, up to 6 cm a frame). Big moves (jumps, falls) are followed at once */
+        if (py_c != c || d6 > 0.6f || d6 < -0.6f || fattr_cached("nocamheightsmooth.txt") != 0xFFFFFFFF) py_s = pos[1]; else py_s += d6 * k6; py_c = c; }
+    float pv3[3] = {pos[0], py_s, pos[2]};
+    float eye[3]; for (int k = 0; k < 3; k++) eye[k] = pv3[k] + (k == 1 ? g_cam_state[1] : 0.0f) + r[k] * g_cam_state[2] + b[k] * g_cam_state[0];
+    float eye_want[3] = {eye[0], eye[1], eye[2]}, st_pivot[3] = {pos[0], py_s + g_cam_state[1], pos[2]};
     {   /* Milestone 102: camera collision through the viewer (the game's world raycast 0xDDD10 never saw the walls, Milestone 94):
            the viewer draws the solid surfaces into a small depth view from the pivot toward the camera and sends back the
            nearest distance (RING pad[80]); the camera stops in front of it at once and eases back out. nocamcollide.txt = off */
-        void cam_collide(const float *st, float *eye, float dt); cam_collide(st_pivot, eye, dt); }
+        void cam_collide(const float *st, float *eye, float dt); if (!scoped()) cam_collide(st_pivot, eye, dt); }
     for (int k = 0; k < 3; k++) { g_eye_ours[k] = eye[k]; g_cr[k] = r[k]; g_cu[k] = u[k]; g_cb[k] = b[k]; }
+    {   /* the lock's cover test: 9 depth samples over the locked character (head / chest / hips x left / middle / right, bfgl.c reads them);
+           a sample with something more than 0.6 m nearer than the character is covered. More than 45% covered for 0.25 s = the lock lets it go */
+        u32 *pd = gpu_pad(); u8 *lock_target_(void); u8 *tg = lock_target_();
+        if (pd && tg && g_proj_t) { float *x = char_xf(tg), *P = g_projB[g_proj_i & 1], V[16], VP[16], IV[16];
+            const float *ax[3] = {r, u, b}; for (int q = 0; q < 3; q++) { for (int k = 0; k < 3; k++) V[q * 4 + k] = ax[q][k]; V[q * 4 + 3] = -(ax[q][0] * eye[0] + ax[q][1] * eye[1] + ax[q][2] * eye[2]); } V[12] = V[13] = V[14] = 0; V[15] = 1;
+            for (int q = 0; q < 4; q++) for (int k = 0; k < 4; k++) { float a2 = 0; for (int m = 0; m < 4; m++) a2 += P[q * 4 + m] * V[m * 4 + k]; VP[q * 4 + k] = a2; }
+            float C[3] = {x[9], x[10] + 0.35f, x[11]}, cl[4], cr[4], cu2[4];
+            for (int q = 0; q < 4; q++) { cl[q] = VP[q * 4 + 3]; cr[q] = VP[q * 4 + 3]; cu2[q] = VP[q * 4 + 3]; for (int k = 0; k < 3; k++) { cl[q] += VP[q * 4 + k] * C[k]; cr[q] += VP[q * 4 + k] * (C[k] + r[k] * 0.25f); cu2[q] += VP[q * 4 + k] * (C[k] + (k == 1 ? 0.4f : 0.0f)); } }
+            if (cl[3] > 0.5f && cr[3] > 0.5f && cu2[3] > 0.5f) { float scx = 320 + 320 * cl[0] / cl[3], scy = 240 - 240 * cl[1] / cl[3], sxp = 320 + 320 * cr[0] / cr[3] - scx, syp = scy - (240 - 240 * cu2[1] / cu2[3]);
+                if (sxp < 0) sxp = -sxp; if (syp < 0) syp = -syp; if (sxp < 1) sxp = 1; if (syp < 1) syp = 1;
+                s32 icx = (s32)scx, icy = (s32)scy; if (icx >= 0 && icx < 640 && icy >= 0 && icy < 480) {
+                    pd[96] = (u32)icx << 16 | (u32)icy; pd[97] = (u32)sxp << 16 | (u32)syp;
+                    static u32 lastc; if (pd[107] != lastc && inv4(VP, IV)) { lastc = pd[107]; int cov = 0;
+                        float dt = -((C[0] - eye[0]) * b[0] + (C[1] - eye[1]) * b[1] + (C[2] - eye[2]) * b[2]);
+                        for (int i = 0; i < 9; i++) { u32 db = pd[98 + i]; float d = *(float *)&db; if (!(d > 0.0f && d < 0.99999f)) continue;
+                            s32 px = icx + (i % 3 - 1) * (s32)sxp, py = icy + (i / 3 - 1) * (s32)syp; float sc[4] = {(px - 320.0f) / 320.0f, (240.0f - py) / 240.0f, d, 1.0f}, X[4];
+                            for (int q = 0; q < 4; q++) { X[q] = 0; for (int k = 0; k < 4; k++) X[q] += IV[q * 4 + k] * sc[k]; } if (X[3] == 0) continue;
+                            float ds = -((X[0] / X[3] - eye[0]) * b[0] + (X[1] / X[3] - eye[1]) * b[1] + (X[2] / X[3] - eye[2]) * b[2]); if (ds < dt - 0.6f) cov++; }
+                        g_cover_frac = cov / 9.0f; static u32 bad_t; u32 nw = GetTickCount();
+                        if (g_cover_frac > 0.45f) { if (!bad_t) bad_t = nw | 1; if (nw - bad_t > 250) { g_cover_block_tg = tg; g_cover_block_until = nw + 1000; bad_t = 0;
+                            static u32 nl; if (nl++ < 30) { out("  [cover] target "); hex((u32)tg); out(" covered "); dec(cov); out("/9: let go\r\n"); } } } else bad_t = 0; } }
+                else pd[96] = 0; } else pd[96] = 0; }
+        else if (pd) pd[96] = 0; }
+    {   /* probe (the target box): during a lock-on special, every 300 ms: each field of the targeting object (g_rt, type 16) holding a
+           character, with that character's screen position (x, y of 640x480), and the target shots go to - which field is the box? */
+        static u32 tb, nb; u32 nw = GetTickCount(); u8 *rt0 = (u8 *)g_rt;
+        if (lock_mode() && rt0 && nb < 120 && nw - tb > 300 && readable(rt0, 0x800)) { tb = nw; nb++; out("  [box]");
+            for (u32 o = 0; o < 0x800; o += 4) { u8 *q = *(u8 **)(rt0 + o); if (!char_is(q)) continue; float *x = char_xf(q);
+                float v[3] = {x[9] - eye[0], x[10] + 0.35f - eye[1], x[11] - eye[2]}, f = -(v[0] * b[0] + v[1] * b[1] + v[2] * b[2]);
+                out(" +"); hex(o); out("="); hex((u32)q); if (f > 0.5f) { s32 sx = (s32)(320 + 320 * (v[0] * r[0] + v[1] * r[1] + v[2] * r[2]) / f / 0.75f), sy = (s32)(240 - 240 * (v[0] * u[0] + v[1] * u[1] + v[2] * u[2]) / f / 0.57f);
+                    out(" @"); if (sx < 0) { out("-"); sx = -sx; } dec((u32)sx); out(","); if (sy < 0) { out("-"); sy = -sy; } dec((u32)sy); } }
+            out("\r\n"); } }
+    {   /* probe (zoom jumps): for 1 s after each zoom in or out, every frame: ms, eye relative to Flint (right, up, back mm), camera yaw and
+           pitch, Flint's yaw (mrad), zoom level, the yaw override and the projection's P11 (field of view) */
+        extern float atan2_ext(float, float); static int lz = -1; static u32 t0, nl; int zz = scoped(); u32 nw = GetTickCount();
+        if (zz != lz) { t0 = nw; lz = zz; } if (nw - t0 < 1000 && nl < 1500) { nl++; float *A = (float *)(c + 0x5BC);
+            float d[3] = {eye[0] - pos[0], eye[1] - pos[1], eye[2] - pos[2]};
+            out("  [zoomf] "); out(zz ? "in " : "out "); dec(nw - t0); out(" eye r/u/b "); fo(d[0] * r[0] + d[2] * r[2]); fo(d[1]); fo(d[0] * b[0] + d[2] * b[2]);
+            out("cam yaw "); fo(atan2_ext(-b[0], -b[2])); out("pitch "); fo(atan2_ext(-b[1], sqrt_(b[0] * b[0] + b[2] * b[2]))); out("flint yaw "); fo(atan2_ext(-A[2], -A[8]));
+            out("act "); dec((u32)g_yaw_act); { float *pj = g_projB[g_proj_i & 1]; out(" P11 "); fo(pj[5] < 0 ? -pj[5] : pj[5]); } out("\r\n"); } }
+    {   /* probe (special + zoom shake): every frame while a special is on and zoomed (up to 900 lines): ms, lock, camera yaw / pitch,
+           Flint's yaw and aim pitch (+0x5F4), our view pitch, eye relative to Flint (right, up, back mm) */
+        extern float atan2_ext(float, float); extern float g_view_pitch; static u32 n9, t9; u32 nw = GetTickCount();
+        static int wl9; static u32 nlk; int lk9 = special_hold(); if (lk9 && !wl9) { t9 = nw; nlk++; if (nlk > 10) n9 = 0; } wl9 = lk9;   /* from each special's start: 1.5 s, 10 times */
+        if (lk9 && nw - t9 < 1500 && n9 < 1500) { n9++; float *A = (float *)(c + 0x5BC); float d[3] = {eye[0] - pos[0], eye[1] - pos[1], eye[2] - pos[2]};
+            out("  [lockf] "); out(scoped() ? "zoom " : ""); { u8 *r_ = (u8 *)g_rt; out("tgt "); hex(r_ && readable(r_ + 0x5D0, 4) ? *(u32 *)(r_ + 0x5D0) : 0); out(" "); } dec(nw - t9); out(" lock "); dec((u32)lock_char()); out(" cam yaw "); fo(atan2_ext(-b[0], -b[2])); out("pitch "); fo(atan2_ext(-b[1], sqrt_(b[0] * b[0] + b[2] * b[2])));
+            out("flint yaw "); fo(atan2_ext(-A[2], -A[8])); out("aim pitch "); fo(*(float *)(c + 0x5F4)); out("view pitch "); fo(g_view_pitch);
+            out("eye "); fo(d[0] * r[0] + d[2] * r[2]); fo(d[1]); fo(d[0] * b[0] + d[2] * b[2]); out("\r\n"); } }
+    {   /* probe (lock jitter): during a special, per 250 ms: the largest frame-to-frame change and the direction reversals of the camera's
+           yaw, pitch, eye (sideways / up) and of the character's position, and the raw aim yaw (+0x5BC) */
+        extern float atan2_ext(float, float); static float ly, lp, lay, le[3], lc[3], dly, dlp, dlay, dle, dlc; static float mx[5]; static u32 rv[5], tl, n, have;
+        if (special_steady()) { u32 nw = GetTickCount(); float *A = (float *)(c + 0x5BC);
+            float yw = atan2_ext(-b[0], -b[2]), pt = atan2_ext(-b[1], sqrt_(b[0] * b[0] + b[2] * b[2])), ay = atan2_ext(-A[2], -A[8]);
+            if (have) { float d[5]; d[0] = yw - ly; d[1] = pt - lp; d[2] = ay - lay; for (int k = 0; k < 3; k++) if (d[k] > 3.14159f) d[k] -= 6.28318f; else if (d[k] < -3.14159f) d[k] += 6.28318f;
+                d[3] = (eye[0] - le[0]) * r[0] + (eye[2] - le[2]) * r[2]; d[4] = (pos[0] - lc[0]) * r[0] + (pos[2] - lc[2]) * r[2];
+                float prev[5] = {dly, dlp, dlay, dle, dlc};
+                for (int k = 0; k < 5; k++) { float a = d[k] < 0 ? -d[k] : d[k]; if (a > mx[k]) mx[k] = a; if (d[k] * prev[k] < 0 && a > 0.0005f) rv[k]++; }
+                dly = d[0]; dlp = d[1]; dlay = d[2]; dle = d[3]; dlc = d[4]; }
+            ly = yw; lp = pt; lay = ay; for (int k = 0; k < 3; k++) { le[k] = eye[k]; lc[k] = pos[k]; } have = 1;
+            if (nw - tl > 250 && n < 300) { tl = nw; n++; out("  [lockjit] lock "); dec((u32)lock_char()); out(" max/frame: cam yaw mrad "); fo(mx[0]); out("pitch "); fo(mx[1]); out("aim yaw "); fo(mx[2]);
+                out("eye side mm "); fo(mx[3]); out("char side mm "); fo(mx[4]); out(" reversals "); for (int k = 0; k < 5; k++) { dec(rv[k]); out(" "); } out("\r\n"); for (int k = 0; k < 5; k++) { mx[k] = 0; rv[k] = 0; } } }
+        else have = 0; }
     { void cam_probe_send(const float *st, const float *eye_want); cam_probe_send(st_pivot, eye_want); }   /* the probe for the next frames, with this frame's final camera */
     {   /* Milestone 93 test (partmove.txt): lift both hand parts (+0x3F8, +0x3FC) by 0.6 m - does the drawn mesh follow? */
-        static u32 on = 2; if (on == 2) on = GetFileAttributesA("partmove.txt") != 0xFFFFFFFF;
+        static u32 on = 2; if (on == 2) on = fattr_cached("partmove.txt") != 0xFFFFFFFF;
         if (on) for (int h = 0; h < 2; h++) { u8 *p = *(u8 **)(c + 0x3F8 + h * 4); int part_like(u8 *, float *); if (part_like(p, pos)) ((float *)(p + 0x38))[1] += 0.6f; } }
     {   /* Milestone 93 probe (partprobe.txt): the character's bone parts - objects with a rotation at +0x14 and a position
            (+0x38) near the character - found directly or in pointer vectors (begin, end) inside the character */
-        static u32 on = 2, done, t0; if (on == 2) on = GetFileAttributesA("partprobe.txt") != 0xFFFFFFFF;
+        static u32 on = 2, done, t0; if (on == 2) on = fattr_cached("partprobe.txt") != 0xFFFFFFFF;
         if (on && done < 2) { if (!t0) t0 = GetTickCount(); if (GetTickCount() - t0 > 20000 + done * 3000) { done++;
             int part_like(u8 *, float *); out("  [parts] char "); hex((u32)c); out(" pos "); fo(pos[0]); fo(pos[1]); fo(pos[2]); out("\r\n");
             for (u32 o = 0; o < 0x1000; o += 4) { u8 *p = *(u8 **)(c + o); if (part_like(p, pos)) { out("   direct +"); hex(o); out(" "); hex((u32)p); float *q = (float *)(p + 0x38); out(" rel "); fo(q[0] - pos[0]); fo(q[1] - pos[1]); fo(q[2] - pos[2]); out("\r\n"); }
@@ -608,7 +967,7 @@ static void cam_build(u8 *cam) {
     /* the game's follow camera is a look-at camera whose eye position ([character +0x6B8] + 0x238) springs after the
        character and trailed far behind on fast turns; everything it drives (streaming, the eye constants) lagged with it.
        It now starts every update from our eye (Milestone 87). */
-    { static u32 ab = 2; if (ab == 2) ab = GetFileAttributesA("camrotgame.txt") != 0xFFFFFFFF || GetFileAttributesA("camposgame.txt") != 0xFFFFFFFF;
+    { static u32 ab = 2; if (ab == 2) ab = fattr_cached("camrotgame.txt") != 0xFFFFFFFF || fattr_cached("camposgame.txt") != 0xFFFFFFFF;
       u8 *cam_block(u8 *); u8 *blk = cam_block(cam);   /* Milestone 91: through the camera object, for any character */
       int blk_has_rot(u8 *); int isrot = 0; if (!blk_has_rot(blk)) { static u32 n; if (n++ < 5) { out("  [cam] block "); hex((u32)blk); out(" of "); hex((u32)c); out(" holds no rotation: not written\r\n"); } }
       else if (0) {   /* Milestone 91: only a block that already holds a rotation matrix. After the
@@ -619,7 +978,7 @@ static void cam_build(u8 *cam) {
           if (isrot) { float d01 = W[0] * W[3] + W[1] * W[4] + W[2] * W[5], d02 = W[0] * W[6] + W[1] * W[7] + W[2] * W[8]; if (d01 > 0.1f || d01 < -0.1f || d02 > 0.1f || d02 < -0.1f) isrot = 0; }
           if (!isrot) { static u32 n; if (n++ < 5) { out("  [cam] block "); hex((u32)blk); out(" of "); hex((u32)c); out(" holds no rotation: not written\r\n"); } } }
       isrot = blk_has_rot(blk);
-      {   static u32 nb, tl; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; nb = GetFileAttributesA("noblockwrite.txt") != 0xFFFFFFFF; } if (nb) isrot = 0; }   /* A/B (Milestone 92): leave the game camera's world transform alone */
+      {   static u32 nb, tl; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; nb = fattr_cached("noblockwrite.txt") != 0xFFFFFFFF; } if (nb) isrot = 0; }   /* A/B (Milestone 92): leave the game camera's world transform alone */
       {   /* Milestone 91 probe: which pointer (in the camera object, or one level down) leads to blk+0x214, the block that worked */
           static u32 done = 2; if (isrot && done < 2) { done++; u32 tgt = (u32)blk + 0x214; out("  [camblk] target "); hex(tgt); out(" cam "); hex((u32)cam);
               for (u32 o = 0; o < 0x400; o += 4) { u32 p = *(u32 *)(cam + o); if (p <= tgt && tgt - p < 0x800) { out(" cam+"); hex(o); out("->+"); hex(tgt - p); }
@@ -634,7 +993,7 @@ static void cam_build(u8 *cam) {
     float *node = ((float *(__thiscall *)(void *))(*(u32 **)(cam + 0x48))[0x14 / 4])(cam + 0x48);
     {   /* A/B tests (Milestone 87): camrotgame.txt keeps the game camera's rotation (our position); camposgame.txt keeps the
            game camera's position (our rotation) */
-        static u32 rg = 2, pg = 2; if (rg == 2) { rg = GetFileAttributesA("camrotgame.txt") != 0xFFFFFFFF; pg = GetFileAttributesA("camposgame.txt") != 0xFFFFFFFF; }
+        static u32 rg = 2, pg = 2; if (rg == 2) { rg = fattr_cached("camrotgame.txt") != 0xFFFFFFFF; pg = fattr_cached("camposgame.txt") != 0xFFFFFFFF; }
         if (pg) for (int k = 0; k < 3; k++) eye[k] = -(node[k] * node[9] + node[3 + k] * node[10] + node[6 + k] * node[11]);
         if (rg) for (int k = 0; k < 3; k++) { r[k] = node[k]; u[k] = node[3 + k]; b[k] = node[6 + k]; } }
     for (int k = 0; k < 3; k++) { node[k] = r[k]; node[3 + k] = u[k]; node[6 + k] = b[k]; }
@@ -651,11 +1010,11 @@ int cam_skip(u8 *cam);
 u8 *g_cam_obj;   /* the player's camera object (for the field-of-view probe) */
 void cam_after(u8 *cam) {
     if (g_player_char && *(u8 **)(cam + 0x148) == (u8 *)g_player_char) g_cam_obj = cam;
-    {   static u32 done; if (!done && GetFileAttributesA("cullfind.txt") != 0xFFFFFFFF) { done = 1; u32 *vt = *(u32 **)(cam + 0x48); DWORD op;
+    {   static u32 done; if (!done && fattr_cached("cullfind.txt") != 0xFFFFFFFF) { done = 1; u32 *vt = *(u32 **)(cam + 0x48); DWORD op;
             IMP BOOL WINAPI VirtualProtect(void *, u32, DWORD, DWORD *); VirtualProtect(&vt[5], 4, 0x40, &op); g_node_get_orig = vt[5]; vt[5] = (u32)node_get_stub; out("  [nodeget] wrapped vtable "); hex((u32)vt); out("\r\n"); } }
     {   /* follow-camera lag probe (camlag.txt): angle between the game's camera (node, before we rebuild it) and the
            character's facing, largest per 0.5 s; camstiff.txt sets the follow camera's springs (+0x128, +0x130) to 400 */
-        static u32 on = 2, stiff = 2; static float stiffv = 120.0f; if (on == 2) { on = GetFileAttributesA("camlag.txt") != 0xFFFFFFFF; stiff = GetFileAttributesA("camstiff.txt") != 0xFFFFFFFF;
+        static u32 on = 2, stiff = 2; static float stiffv = 120.0f; if (on == 2) { on = fattr_cached("camlag.txt") != 0xFFFFFFFF; stiff = fattr_cached("camstiff.txt") != 0xFFFFFFFF;
             if (stiff) { IMP HANDLE WINAPI CreateFileA(const char *, DWORD, DWORD, void *, DWORD, DWORD, HANDLE); IMP BOOL WINAPI ReadFile(HANDLE, void *, DWORD, DWORD *, void *); IMP BOOL WINAPI CloseHandle(HANDLE);
                 HANDLE f = CreateFileA("camstiff.txt", 0x80000000, 1, 0, 3, 0x80, 0); if (f != (HANDLE)-1) { char t[16]; DWORD n = 0; ReadFile(f, t, 15, &n, 0); CloseHandle(f); s32 v = 0; for (DWORD k = 0; k < n; k++) if (t[k] >= 0x30 && t[k] <= 0x39) v = v * 10 + t[k] - 0x30; if (v > 0) stiffv = (float)v; } } }
         u8 *c = (u8 *)g_player_char;
@@ -668,7 +1027,7 @@ void cam_after(u8 *cam) {
     {   static u32 t0; if (g_player_char && *(u8 **)(cam + 0x148) == (u8 *)g_player_char) { if (!t0) t0 = GetTickCount(); if (!g_seq_n && GetTickCount() - t0 > 20000) g_seq_on = 1; seq_add(1); } }
     {   /* eye probe (eyeprobe.txt): which shader constants hold a camera position: ours (built last frame) or the follow
            camera's (its node before we rebuild it) */
-        static u32 on = 2; if (on == 2) on = GetFileAttributesA("eyeprobe.txt") != 0xFFFFFFFF;
+        static u32 on = 2; if (on == 2) on = fattr_cached("eyeprobe.txt") != 0xFFFFFFFF;
         u8 *c = (u8 *)g_player_char;
         if (on && c && *(u8 **)(cam + 0x148) == c) { extern float g_eye_ours[3]; static float fe[3]; static u32 t0, n;
             float *nd = ((float *(__thiscall *)(void *))(*(u32 **)(cam + 0x48))[0x14 / 4])(cam + 0x48);
@@ -679,12 +1038,12 @@ void cam_after(u8 *cam) {
                     if (d1 < 0.25f) { out(" c"); dec(q); out("=ours"); } else if (d2 < 0.25f) { out(" c"); dec(q); out("=follow"); } }
                 out("\r\n"); }
             for (int k = 0; k < 3; k++) fe[k] = -(nd[k] * nd[9] + nd[3 + k] * nd[10] + nd[6 + k] * nd[11]); } }
-    {   u8 *c = (u8 *)g_player_char; static u32 ct = 2; if (ct == 2) ct = GetFileAttributesA("camtest.txt") != 0xFFFFFFFF;
+    {   u8 *c = (u8 *)g_player_char; static u32 ct = 2; if (ct == 2) ct = fattr_cached("camtest.txt") != 0xFFFFFFFF;
         if (c && *(u8 **)(cam + 0x148) == c) { float *nd = ((float *(__thiscall *)(void *))(*(u32 **)(cam + 0x48))[0x14 / 4])(cam + 0x48);
             for (int k = 0; k < 3; k++) { g_eye_follow_prev[k] = g_eye_follow[k]; g_eye_follow[k] = -(nd[k] * nd[9] + nd[3 + k] * nd[10] + nd[6 + k] * nd[11]); }
             g_eye_swap = GetFileAttributesA_cached_camoffset() && (g_mouse_on || ct); } }
     {   /* statefind.txt: during the fast-turn test, search Xbox memory for the follow camera's right/back vectors */
-        static u32 on = 2, n, t0; if (on == 2) on = GetFileAttributesA("statefind.txt") != 0xFFFFFFFF; extern u32 g_mt_active; extern volatile s32 g_fake_dx;
+        static u32 on = 2, n, t0; if (on == 2) on = fattr_cached("statefind.txt") != 0xFFFFFFFF; extern u32 g_mt_active; extern volatile s32 g_fake_dx;
         u8 *c = (u8 *)g_player_char;
         if (on && c && *(u8 **)(cam + 0x148) == c && g_mt_active && g_fake_dx > 200 && n < 3 && GetTickCount() - t0 > 2000) { t0 = GetTickCount(); n++;
             float *nd = ((float *(__thiscall *)(void *))(*(u32 **)(cam + 0x48))[0x14 / 4])(cam + 0x48);
@@ -708,7 +1067,7 @@ void cam_after(u8 *cam) {
                     a = base + size; }
                 out("\r\n"); } } }
     {   /* blockdiff.txt: during the fast-turn test, the floats of [character +0x6B8] (0x300 bytes) that changed since the last frame */
-        static u32 on = 2, n; static float prev[0xC0]; static int have; if (on == 2) on = GetFileAttributesA("blockdiff.txt") != 0xFFFFFFFF; extern u32 g_mt_active; extern volatile s32 g_fake_dx;
+        static u32 on = 2, n; static float prev[0xC0]; static int have; if (on == 2) on = fattr_cached("blockdiff.txt") != 0xFFFFFFFF; extern u32 g_mt_active; extern volatile s32 g_fake_dx;
         u8 *c = (u8 *)g_player_char;
         if (on && c && *(u8 **)(cam + 0x148) == c) { float *blk = *(float **)(c + 0x6B8);
             if (g_mt_active && g_fake_dx > 200 && n < 3) { if (have) { n++;
@@ -727,9 +1086,9 @@ void cam_after(u8 *cam) {
     if (GetFileAttributesA_cached_camoffset()) cam_build(cam);
     {   /* Milestone 93: apply the arm pose before anything is drawn (the rifle is drawn from data prepared before the
            character's palette is built); the palette hook applies it again only where it was not applied yet */
-        extern u8 *g_pbones; void pose_apply(u8 *); static u32 early = 2; if (early == 2) early = GetFileAttributesA("noearlypose.txt") == 0xFFFFFFFF;
+        extern u8 *g_pbones; void pose_apply(u8 *); static u32 early = 2; if (early == 2) early = fattr_cached("noearlypose.txt") == 0xFFFFFFFF;
         if (early && g_pbones && g_player_char && *(u8 **)(cam + 0x148) == (u8 *)g_player_char) pose_apply(g_pbones); }
-    static u32 done, t0, chk = 2; if (chk == 2) chk = GetFileAttributesA("camdump.txt") != 0xFFFFFFFF; extern u32 g_mt_active; if (!chk || done >= 10 || !g_mt_active) return;
+    static u32 done, t0, chk = 2; if (chk == 2) chk = fattr_cached("camdump.txt") != 0xFFFFFFFF; extern u32 g_mt_active; if (!chk || done >= 10 || !g_mt_active) return;
     u8 *c = (u8 *)g_player_char; if (!c || *(u8 **)(cam + 0x148) != c) return;
     u32 t = GetTickCount(); if (done && t - t0 < 400) return; t0 = t; done++;
     {   /* pointed-to objects: their changing floats (first 0x200 bytes) */
@@ -746,8 +1105,20 @@ void cam_after(u8 *cam) {
     for (u32 o = 0; o < 0x80; o += 4) { float f = *(float *)(c + o); s32 v = (s32)(f * 100); if (f > -100000.0f && f < 100000.0f && v) { out(" "); hex(o); out("="); if (v < 0) { out("-"); v = -v; } dec((u32)v); } }
     out("\r\n"); }
 static int readable(const void *p, u32 n) {   /* committed, readable memory (our own code must never fault) */
-    IMP u32 WINAPI VirtualQuery(const void *, void *, u32); u32 mb[7];
-    if (!VirtualQuery(p, mb, sizeof mb) || mb[4] != 0x1000 || (mb[5] & 0x101) || !(mb[5] & 0xEE)) return 0; return (u32)p + n <= mb[0] + mb[3]; }
+    /* performance (Nov 21): one VirtualQuery per call, thousands per frame from the pose / weapon / aim code, kept the game thread in the
+       Windows kernel ~88% of the time in busy scenes. The answer is cached per 4 KB page for 1 s (the game's memory map does not change
+       during play). uncachedread.txt = the old way. */
+    IMP u32 WINAPI VirtualQuery(const void *, void *, u32);
+    u32 a = (u32)p, last = a + (n ? n : 1) - 1; if (last < a) return 0;
+    static u32 tag[4096], when[4096]; static u8 ok[4096]; static u32 tchk, off_; u32 now = GetTickCount();
+    if (now - tchk > 1000) { tchk = now; off_ = fattr_cached("uncachedread.txt") != 0xFFFFFFFF; }
+    if (off_) { u32 mb[7]; if (!VirtualQuery(p, mb, sizeof mb) || mb[4] != 0x1000 || (mb[5] & 0x101) || !(mb[5] & 0xEE)) return 0; return a + n <= mb[0] + mb[3]; }
+    for (u32 pg = a >> 12; pg <= (last >> 12); pg++) {
+        u32 s = pg & 4095;
+        if (tag[s] != pg + 1 || now - when[s] > 1000) { u32 mb[7]; int r = VirtualQuery((void *)(pg << 12), mb, sizeof mb) && mb[4] == 0x1000 && !(mb[5] & 0x101) && (mb[5] & 0xEE);
+            tag[s] = pg + 1; when[s] = now; ok[s] = (u8)r; }
+        if (!ok[s]) return 0; }
+    return 1; }
 int part_like(u8 *p, float *pos) {   /* rotation (unit rows) at +0x14 and a position within 3 m of pos at +0x38 */
     if ((u32)p <= 0x10000 || (u32)p >= 0x7FFE0000u || ((u32)p & 3) || !readable(p + 0x14, 0x30)) return 0; float *W = (float *)(p + 0x14);
     for (int k = 0; k < 3; k++) { float l = W[k * 3] * W[k * 3] + W[k * 3 + 1] * W[k * 3 + 1] + W[k * 3 + 2] * W[k * 3 + 2]; if (!(l > 0.9f && l < 1.1f)) return 0; }
@@ -762,13 +1133,13 @@ int blk_has_rot(u8 *blk) {   /* Milestone 91: a block holding the game camera's 
 u8 *cam_block(u8 *cam) { u32 a = *(u32 *)(cam + 0x50); if (a <= 0x10000 || a >= 0x7FFE0000u || !readable((void *)a, 0x60)) return 0;
     u32 b = *(u32 *)(a + 0x5C); if (b <= 0x10000 || b >= 0x7FFE0000u) return 0; return (u8 *)(b - 0x200); }
 int cam_skip(u8 *cam) {   /* camskip.txt: the player's follow camera is not updated by the game while our camera is active */
-    static u32 on = 2; if (on == 2) on = GetFileAttributesA("gamecamera.txt") == 0xFFFFFFFF;   /* with our camera, the game's follow update is skipped for the player */
-    static u32 ct = 2; if (ct == 2) ct = GetFileAttributesA("camtest.txt") != 0xFFFFFFFF;
+    static u32 on = 2; if (on == 2) on = fattr_cached("gamecamera.txt") == 0xFFFFFFFF;   /* with our camera, the game's follow update is skipped for the player */
+    static u32 ct = 2; if (ct == 2) ct = fattr_cached("camtest.txt") != 0xFFFFFFFF;
     if (!(on && g_player_char && *(void **)(cam + 0x148) == g_player_char && (g_mouse_on || ct))) return 0;
     u8 *c = (u8 *)g_player_char;
     {   /* Milestone 92: the game's follow update now always runs (its other per-frame work, e.g. the health bar, depends on
            it); cam_after then overwrites the camera. camskip2.txt brings back the skip (A/B) */
-        static u32 sk, tl; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; sk = GetFileAttributesA("camskip2.txt") != 0xFFFFFFFF; } if (!sk) return 0; }
+        static u32 sk, tl; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; sk = fattr_cached("camskip2.txt") != 0xFFFFFFFF; } if (!sk) return 0; }
     {   /* Milestone 91: after the camera's target changes (a squad member taken over), the game's follow update runs for
            1.5 s: it starts at the character and pulls back; skipped, the game kept thinking the camera was inside the
            character and hid him */
@@ -797,7 +1168,7 @@ void view_adjust(void) {
     if (g_view_dump) { static u32 n, t0; u32 t = GetTickCount(); if (n < 6 && t - t0 > 3000) { t0 = t; n++; float *V = (float *)0x4A5858; out("  [view]");
         for (int k = 0; k < 16; k++) { s32 v = (s32)(V[k] * 1000); out(k % 4 ? " " : " | "); if (v < 0) { out("-"); v = -v; } dec((u32)v); } out("\r\n"); } return; }
     return;   /* the offset is now applied to the camera transform (cam_xform_adjust), for the view and the effects alike */
-    static u32 camtest = 2; if (camtest == 2) camtest = GetFileAttributesA("camtest.txt") != 0xFFFFFFFF;
+    static u32 camtest = 2; if (camtest == 2) camtest = fattr_cached("camtest.txt") != 0xFFFFFFFF;
     if (!g_mouse_on && !camtest) { g_cam_t = 0; return; }
     static s64 lt, qf; s64 now; if (!qf) QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&now);
     float dt = lt ? (float)(now - lt) / (float)qf : 0.0f; lt = now; if (dt > 0.1f) dt = 0.1f;
@@ -830,7 +1201,7 @@ void cam_xform_adjust(float *m, float *node) {
         for (int k = 0; k < 12; k++) { s32 v = (s32)(m[k] * 1000); out(k % 3 ? " " : " | "); if (v < 0) { out("-"); v = -v; } dec((u32)v); }
         float *V = (float *)0x4A5858; out("  view rows:"); for (int k = 0; k < 12; k++) { s32 v = (s32)(V[k] * 1000); out(k % 4 ? " " : " | "); if (v < 0) { out("-"); v = -v; } dec((u32)v); } out("\r\n"); } return; }
     return;   /* Milestone 87: the camera is now built in cam_after (camera node), not shifted here */
-    static u32 camtest = 2; if (camtest == 2) camtest = GetFileAttributesA("camtest.txt") != 0xFFFFFFFF;
+    static u32 camtest = 2; if (camtest == 2) camtest = fattr_cached("camtest.txt") != 0xFFFFFFFF;
     if (!g_mouse_on && !camtest) { g_cam_t = 0; return; }
     static s64 lt, qf; s64 now; if (!qf) QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&now);
     float dt = lt ? (float)(now - lt) / (float)qf : 0.0f; lt = now; if (dt > 0.1f) dt = 0.1f;
@@ -892,6 +1263,7 @@ static int vp_matches(const float *M) {   /* does view-projection M still belong
    shot are usually another pass's: a fast-firing minigun found them almost never in E01). */
 static float g_projB[2][16]; static volatile u32 g_proj_t, g_proj_i;   /* double-buffered: a shot never reads one half written */
 #define g_projM g_projB[g_proj_i & 1]
+float g_hip_p11 = 1.732f;   /* set from the caught projection (vp_watch); 60 degrees until then */
 static void our_view(float *V) { const float *ax[3] = {g_cr, g_cu, g_cb}; for (int r = 0; r < 3; r++) { for (int k = 0; k < 3; k++) V[r * 4 + k] = ax[r][k]; V[r * 4 + 3] = -(ax[r][0] * g_eye_ours[0] + ax[r][1] * g_eye_ours[1] + ax[r][2] * g_eye_ours[2]); } V[12] = V[13] = V[14] = 0; V[15] = 1; }
 void vp_watch(const float *M) {
     extern u32 g_mouse_on; if (!g_mouse_on) return;
@@ -903,6 +1275,7 @@ void vp_watch(const float *M) {
     u32 nb = (g_proj_i + 1) & 1; float *pm = g_projB[nb];
     for (int r = 0; r < 4; r++) for (int cc = 0; cc < 4; cc++) { float a = 0; for (int k = 0; k < 4; k++) a += M[r * 4 + k] * iV[k * 4 + cc]; pm[r * 4 + cc] = a; }
     g_proj_i = nb; g_proj_t = GetTickCount() | 1;
+    { float p11 = pm[5] < 0 ? -pm[5] : pm[5]; if (!scoped() && p11 > 0.5f && p11 < 5.0f) g_hip_p11 = p11; }   /* the unzoomed view's 1 / tan(half the vertical field of view) (scope lift) */
     {   /* probe: the projection's field of view over time (the view seemed to pull back after sprinting): P[0][0], P[1][1] and the
            camera object's floats that look like an angle (0.2 .. 3 rad) or a zoom, logged when P[1][1] changes by 2% */
         extern u8 *g_cam_obj; extern u32 g_sprinting; static float lp; static u32 n; float p11 = pm[5] < 0 ? -pm[5] : pm[5];
@@ -922,7 +1295,7 @@ static void mul4(const float *a, const float *b, float *o) { for (int r = 0; r <
 #define PROBE_NEAR 0.7f     /* the pivot sits inside the player's own body (and gun) */
 void cam_probe_send(const float *st, const float *eye_want) {
     u32 *pd = gpu_pad(); if (!pd) return;
-    static u32 off = 2; if (off == 2) off = GetFileAttributesA("nocamcollide.txt") != 0xFFFFFFFF;
+    static u32 off = 2; if (off == 2) off = fattr_cached("nocamcollide.txt") != 0xFFFFFFFF;
     if (off || !g_proj_t) { pd[61] = 0; return; }
     const float *P = g_projB[g_proj_i & 1]; float P00 = P[0], P11 = P[5], P02 = P[2], P12 = P[6], P32 = P[14], P33 = P[15];
     if (P00 > -1e-4f && P00 < 1e-4f) return; if (P11 > -1e-4f && P11 < 1e-4f) return; if (P32 > -1e-4f && P32 < 1e-4f) return;
@@ -949,7 +1322,8 @@ void cam_probe_send(const float *st, const float *eye_want) {
     pd[62] = *(u32 *)&n; pd[63] = *(u32 *)&fa; pd[61] = 1;
     __sync_synchronize(); pd[60] = sq + 1; }
 void cam_collide(const float *st, float *eye, float dt) {
-    static u32 off = 2; if (off == 2) off = GetFileAttributesA("nocamcollide.txt") != 0xFFFFFFFF; if (off) return;
+    static u32 off = 2; if (off == 2) off = fattr_cached("nocamcollide.txt") != 0xFFFFFFFF; if (off) return;
+    if (lock_mode() && fattr_cached("specialnocollide.txt") != 0xFFFFFFFF) return;   /* opt-in: skipping collision in a special made it shake */   /* only during Flint's lock-on: skipping it in every special made the specials shake (found by testing) */   /* every special (the probe pulled the camera in and out: shake) */   /* from the White press (before the energy drops the probe pulled the camera in and out: shake at a lock's start) */   /* the centred camera's probe hit the character itself: the camera jumped (shake) */
     u32 *pd = gpu_pad(); if (!pd) return;
     float dv[3] = {eye[0] - st[0], eye[1] - st[1], eye[2] - st[2]}, L = sqrt_(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]); if (L < 0.5f) return;
     static u32 lastc, lastt; static float wall = 1e9f; u32 now = GetTickCount();
@@ -962,6 +1336,19 @@ static u32 g_rng = 12345; static float frand(void) { g_rng = g_rng * 1664525u + 
 static float sqrt_(float x) { float r; __asm__("fsqrt" : "=t"(r) : "0"(x)); return r; }
 static float sin_(float x) { float r; __asm__("fsin" : "=t"(r) : "0"(x)); return r; }
 static float cos_(float x) { float r; __asm__("fcos" : "=t"(r) : "0"(x)); return r; }
+/* the world point under the over-the-shoulder reticle (320, 190): the viewer's depth there (pad[50]) unprojected with the caught
+   projection x our view. 0 when there is none (sky, no projection yet) */
+int screen_world(float sy, float *T);
+int reticle_world(float *T) { return screen_world(190.0f, T); }
+int screen_world(float sy, float *T) {   /* the world point under (320, sy) of 640x480: the depth sample (pad[50], taken at pad[52], pad[53]) */
+    u32 *pd = gpu_pad(); if (!pd || !pd[51] || pd[53] != (u32)sy || !g_proj_t || (s32)(GetTickCount() - g_proj_t) > 30000) return 0;
+    float V[16], VP[16], IV[16]; our_view(V); const float *pj = g_projB[g_proj_i & 1];
+    for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) { float a = 0; for (int k = 0; k < 4; k++) a += pj[r * 4 + k] * V[k * 4 + c]; VP[r * 4 + c] = a; }
+    if (!vp_matches(VP) || !inv4(VP, IV)) return 0;
+    u32 dbits = pd[50]; float d01 = *(float *)&dbits; if (!(d01 > 0) || d01 > 0.99999f) return 0;
+    float sc[4] = {0.0f, (240.0f - sy) / 240.0f, d01, 1.0f}, X[4];
+    for (int r = 0; r < 4; r++) { X[r] = 0; for (int k = 0; k < 4; k++) X[r] += IV[r * 4 + k] * sc[k]; }
+    if (X[3] == 0) return 0; for (int k = 0; k < 3; k++) T[k] = X[k] / X[3]; return 1; }
 void aim_fix(u8 *w, float *pos, float *dir) {
     extern u32 g_ourcam; if (!g_ourcam) return;   /* the game's camera: the game's own aiming */
     u8 *own = w ? *(u8 **)(w + 8) : 0;
@@ -986,9 +1373,60 @@ void aim_fix(u8 *w, float *pos, float *dir) {
             if (nc == 0xFFFFFFFF) { nc = 0; for (u32 o = 0; o < 0x1000 && nc < 64; o += 4) if (*(u32 *)(ch + o) == (u32)w) cand[nc++] = o; }
             else { u32 m = 0; for (u32 i = 0; i < nc; i++) if (*(u32 *)(ch + cand[i]) == (u32)w) cand[m++] = cand[i]; nc = m; }
             out("  [curweapon] fired "); hex((u32)w); out(", character fields holding it:"); for (u32 i = 0; i < nc; i++) { out(" +"); hex(cand[i]); } out("\r\n"); } }
-    static u32 camtest = 2; if (camtest == 2) camtest = GetFileAttributesA("camtest.txt") != 0xFFFFFFFF;
+    static u32 camtest = 2; if (camtest == 2) camtest = fattr_cached("camtest.txt") != 0xFFFFFFFF;
     if (!g_mouse_on && !camtest) return;
-    static u32 off, tl; { u32 t = GetTickCount(); if (t - tl > 1000) { tl = t; off = GetFileAttributesA("noaimfix.txt") != 0xFFFFFFFF; } } if (off) return;
+    static u32 off, tl; { u32 t = GetTickCount(); if (t - tl > 1000) { tl = t; off = fattr_cached("noaimfix.txt") != 0xFFFFFFFF; } } { int sp = lock_mode(), lk = locked_now(); static u32 ns; if (sp && ns++ < 60) { out("  [specialshot] lock "); dec(lk); out(lk ? " -> the game aims" : " -> crosshair aim"); out("\r\n"); }
+      if (off) return;
+      /* (zoomed in: re-aimed at the screen centre, the scope's crosshair - see g_scoped) */
+      if (sp) {   /* during a special (Flint's auto-lock): aim from the muzzle at the locked character's chest (the game's own aim missed
+                     at long range); no locked character: the game aims. nolockaim.txt = always the game's aim */
+          u8 *t = 0; u32 ty = 0;   /* the target the game has locked (targeting object +0x5D0) first: the last character the lock-on check saw changed
+                                      between nearby enemies every frame (shots jumped between them) */
+          { u8 *lock_target(void); u8 *q = lock_target(); if (q) { t = q; ty = 3; } }
+          if (ty != 3) { t = (u8 *)g_lock_t; if (locked_now() && t && readable(t, 0x10)) { u8 *k = *(u8 **)(t + 0xC); if (k && readable(k, 8)) ty = *(u32 *)(k + 4); } }
+          if (ty != 3) { u8 *r2 = (u8 *)g_rt; u32 ty2 = 0; if (r2 && readable(r2, 0x10)) { u8 *k = *(u8 **)(r2 + 0xC); if (k && readable(k, 8)) ty2 = *(u32 *)(k + 4); }
+              { static u32 nr; if (nr++ < 40) { out("  [lockshot] reticle object "); hex((u32)r2); out(" type "); dec(ty2); out("\r\n"); } }
+              if (ty2 == 3) { t = r2; ty = 3; }   /* the reticle's object (aim_reticle_keep) when it is a character */
+              else if (ty2 == 16 && readable(r2, 0x800)) {   /* the targeting object (type 16): the locked character is one of its fields */
+                  for (u32 o = 0; o < 0x800; o += 4) { u8 *q = *(u8 **)(r2 + o); if (!char_is(q)) continue;
+                      u8 *k = *(u8 **)(q + 0xC); if (!k || !readable(k, 8) || *(u32 *)(k + 4) != 3) continue;
+                      { static u32 nf; if (nf++ < 20) { out("  [lockshot] targeting object +"); hex(o); out(" -> character "); hex((u32)q); out("\r\n"); } }
+                      t = q; ty = 3; break; } } }
+          {   /* a shot in a gap of the lock (before it catches, or when it drops for a moment) goes at the last locked character, up to 1 s */
+              static u8 *lt9; static u32 lt9_t; u32 n9 = GetTickCount(); if (ty == 3 && char_is(t)) { lt9 = t; lt9_t = n9; } else if (lt9 && n9 - lt9_t < 1000 && char_is(lt9)) { t = lt9; ty = 3; } }
+          { static u32 nq; if (nq++ < 40) { out("  [lockshot] locked "); dec(locked_now()); out(" target "); hex((u32)t); out(" type "); dec(ty); out("\r\n"); } }
+          if (ty == 3 && char_is(t) && fattr_cached("nolockaim.txt") == 0xFFFFFFFF) {
+              float *x = ((float *(__thiscall *)(void *))(*(u32 **)t)[0x40 / 4])(t); extern int g_aim_part; static const float ap[5][2] = {{0.25f, 0.0f}, {0.75f, 0.0f}, {0.0f, 0.0f}, {0.35f, -0.3f}, {0.35f, 0.3f}};   /* chest, head, hips, left, right */
+              float sxp = -(x[11] - pos[2]), szp = x[9] - pos[0], slp = sqrt_(sxp * sxp + szp * szp); if (slp > 1e-3f) { sxp /= slp; szp /= slp; }
+              float T[3] = {x[9] + sxp * ap[g_aim_part][1], x[10] + ap[g_aim_part][0], x[11] + szp * ap[g_aim_part][1]};   /* the character's position is at the hips (0.7 m below the muzzle): +0.35 = chest (+1.1 went over the head) */
+              float v[3] = {T[0] - pos[0], T[1] - pos[1], T[2] - pos[2]}, l = sqrt_(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+              if (l > 0.5f) { float od[3] = {dir[0], dir[1], dir[2]};
+                  { static u32 nd; if (nd++ < 40) { float dt = (od[0] * v[0] + od[1] * v[1] + od[2] * v[2]) / l; out("  [lockshot] target dist x10 "); dec((u32)(l * 10)); out(" game-vs-ours cos x1000 "); dec((u32)(dt * 1000 + 1000)); out(" (1000+)"); out(" target y-muzzle y x100 "); dec((u32)((x[10] - pos[1]) * 100 + 10000)); out(" (10000+)\r\n"); } }
+                  int bodyc = 0; { int body_center(u8 *, float *); float Bc[3]; if (fattr_cached("nobodyaim.txt") == 0xFFFFFFFF && body_center(t, Bc)) { for (int k2 = 0; k2 < 3; k2++) { T[k2] = Bc[k2]; v[k2] = T[k2] - pos[k2]; } l = sqrt_(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); bodyc = 1; } }   /* the body's middle */
+                  if (!bodyc)                   {   /* the game's own lock aim knows each character's shape (tall / floating ones were shot over at a fixed height): when it
+                         already points at the target (within ~6 degrees) the shot keeps that direction, at the target's distance */
+                      float cs = (od[0] * v[0] + od[1] * v[1] + od[2] * v[2]) / l; if (cs > 0.9945f && fattr_cached("fixedaimheight.txt") == 0xFFFFFFFF) { for (int k2 = 0; k2 < 3; k2++) { v[k2] = od[k2] * l; T[k2] = pos[k2] + v[k2]; } } }
+                  for (int k2 = 0; k2 < 3; k2++) dir[k2] = v[k2] / l;
+                  { extern float g_zT[3], g_zM0[3]; extern u32 g_zT_t; extern float *g_zsd; for (int k2 = 0; k2 < 3; k2++) { g_zT[k2] = T[k2]; g_zM0[k2] = pos[k2]; } g_zT_t = GetTickCount() | 1;   /* the hit ray (bray_wrap) is steered at the chest too */
+                    g_zsd = 0; for (int ix = 0; ix < 4; ix++) { float *sd = (float *)(w + 0x25C + ix * 12); if (readable(sd, 12) && sd[0] == od[0] && sd[1] == od[1] && sd[2] == od[2]) { g_zsd = sd; break; } } }
+                  for (int ix = 0; ix < 4; ix++) { float *sd = (float *)(w + 0x25C + ix * 12); if (readable(sd, 12) && sd[0] == od[0] && sd[1] == od[1] && sd[2] == od[2]) { sd[0] = dir[0]; sd[1] = dir[1]; sd[2] = dir[2]; break; } } } }
+          return; } }
+    if (scoped() && !special_steady() && fattr_cached("gamescope.txt") != 0xFFFFFFFF) return;
+    if (scoped() && !lock_mode() && fattr_cached("scopedepthaim.txt") == 0xFFFFFFFF) {   /* zoomed (our camera): the bullet starts on the
+            crosshair's own line beside the gun and flies along it - exact at any distance, no depth reading (aiming at the depth point
+            from the gun, 19 cm off the line, landed above). scopedepthaim.txt = the depth re-aim */
+        float F[3] = {-g_cb[0], -g_cb[1], -g_cb[2]}, m[3] = {pos[0] - g_eye_ours[0], pos[1] - g_eye_ours[1], pos[2] - g_eye_ours[2]}, t = m[0] * F[0] + m[1] * F[1] + m[2] * F[2];
+        if (t > 0.1f && t < 5.0f) { float od[3] = {dir[0], dir[1], dir[2]}, M0[3] = {pos[0], pos[1], pos[2]};
+            for (int q = 0; q < 3; q++) { pos[q] = g_eye_ours[q] + F[q] * t; dir[q] = F[q]; }
+            /* the trail is drawn from the gun (24 cm off the line) along the weapon's stored direction: aimed at where the shot lands (the
+               crosshair's point: depth there, else 150 m out) so it meets the crosshair instead of running parallel, low and left */
+            float TD[3]; { int screen_world(float sy, float *T); float Tp[3], L = 100.0f; if (0 && screen_world(240.0f, Tp)) {   /* a fixed 100 m: the depth reading swung the shots (near and far readings) */ float e[3] = {Tp[0] - g_eye_ours[0], Tp[1] - g_eye_ours[1], Tp[2] - g_eye_ours[2]}; float dd = e[0] * F[0] + e[1] * F[1] + e[2] * F[2]; if (dd > 2.0f && dd < 400.0f) L = dd; }
+                for (int q = 0; q < 3; q++) { TD[q] = g_eye_ours[q] + F[q] * L - M0[q]; g_zT[q] = g_eye_ours[q] + F[q] * L; } g_zT_t = GetTickCount() | 1; float tl = sqrt_(TD[0] * TD[0] + TD[1] * TD[1] + TD[2] * TD[2]); for (int q = 0; q < 3; q++) TD[q] /= tl; }
+            for (int q = 0; q < 3; q++) { pos[q] = M0[q]; dir[q] = TD[q]; g_zM0[q] = M0[q]; } g_zsd = 0;
+            for (int ix = 0; ix < 4; ix++) { float *sd = (float *)(w + 0x25C + ix * 12); if (readable(sd, 12) && sd[0] == od[0] && sd[1] == od[1] && sd[2] == od[2]) { g_zsd = sd; break; } }
+            { static u32 nl; if (nl++ < 24) { out("  [scopeshot] pos "); fo(M0[0]); fo(M0[1]); fo(M0[2]); out("dir "); fo(TD[0]); fo(TD[1]); fo(TD[2]); out("muzzles"); for (int ix = 0; ix < 4; ix++) { float *mz = (float *)(w + 0x22C + ix * 12); if (readable(mz, 12)) { out(" |"); fo(mz[0]); fo(mz[1]); fo(mz[2]); } } out("\r\n"); } }   /* the game ignores a moved start (the hole was 45 px left): the bullet goes from the gun at the crosshair's point, like the trail */
+            for (int ix = 0; ix < 4; ix++) { float *sd = (float *)(w + 0x25C + ix * 12); if (readable(sd, 12) && sd[0] == od[0] && sd[1] == od[1] && sd[2] == od[2]) { sd[0] = TD[0]; sd[1] = TD[1]; sd[2] = TD[2]; break; } }
+            static u32 nl; if (nl++ < 20) { out("  [scopeshot] on the crosshair line, moved mm "); fo(m[0] - F[0] * t); fo(m[1] - F[1] * t); fo(m[2] - F[2] * t); out("\r\n"); } return; } }   /* only with the game's scope camera (opt-in); on our camera zoomed shots are re-aimed at the crosshair's point like hip shots (they flew parallel from the gun, above the eye: high) */   /* zoomed in: the game's scope camera, the game's aim */
     u32 *pd = gpu_pad(); if (!pd || !pd[51]) return;
     float *C = render_consts(); int s = vp_slot(C);
     static float lastVP[16]; static int have; static u32 vp_t; float VP[16], IV[16]; u32 tnow = GetTickCount();
@@ -996,6 +1434,11 @@ void aim_fix(u8 *w, float *pos, float *dir) {
     /* Milestone 97: when the rows are found, their projection part (Proj = VP x inverse(our view then)) is kept; when they are not
        (a fast-firing minigun often catches the constants of another draw), VP = Proj x our view now: right while turning and after a death */
     float V[16]; our_view(V);
+    int scope_vp = 0;
+    if (scoped() && C && fattr_cached("scopeslots.txt") != 0xFFFFFFFF) {   /* test only: slots 10-13 were not the scope's view (shots ~60 degrees off) */   /* zoomed in: the game draws from its own scope camera; its view-projection
+        is in the vertex shader constants (slots 10-13) - our camera's did not match the scope's picture (shots low and left) */
+        for (int k = 0; k < 16; k++) VP[k] = C[40 + k]; scope_vp = 1; static u32 ns; if (ns++ < 5) out("  [aim] scoped: the scope camera's view-projection (slots 10-13)\r\n"); }
+    if (!scope_vp) {
     if (g_proj_t && (s32)(tnow - g_proj_t) < 30000) {   /* signed: it may have been caught just after tnow was read */   /* the projection caught at upload x our view now (the projection itself rarely changes) */
         const float *pj = g_projB[g_proj_i & 1];
         for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) { float a = 0; for (int k = 0; k < 4; k++) a += pj[r * 4 + k] * V[k * 4 + c]; VP[r * 4 + c] = a; }
@@ -1007,11 +1450,12 @@ void aim_fix(u8 *w, float *pos, float *dir) {
     else if (s < 0) { static u32 ns; if (g_proj_t && ns++ < 10) { out("  [aim] caught projection too old: "); dec(tnow - g_proj_t); out(" ms\r\n"); } st_none++; return; }
     else if (s >= 0) { for (int k = 0; k < 16; k++) lastVP[k] = VP[k] = C[s * 4 + k]; have = 1; vp_t = tnow; st_ok++; }
     else { st_none++; return; }
+    }
     if (!inv4(VP, IV)) return;
     u32 dbits = pd[50]; float d01 = *(float *)&dbits; if (!(d01 > 0) || d01 > 1) d01 = 1;
     if (d01 > 0.99999f) d01 = 0.99999f;
     /* spread: radius in pixels (640x480), hip fire wide, aiming tight */
-    float rad = 18.0f * (1.0f - g_aim_t) + 1.2f * g_aim_t;   /* the hip-fire reticle (scale 1.25) has a ring radius of ~20 px */
+    float rad = 18.0f * (1.0f - g_aim_t) + 1.2f * g_aim_t; if (scoped()) rad = 1.2f;   /* zoomed: tight (zooming with the zoom key alone counted as hip fire) */   /* the hip-fire reticle (scale 1.25) has a ring radius of ~20 px */
     {   /* Milestone 96: shotguns keep the hip-fire spread when aiming (user). A weapon type that fires several rays in the same
            millisecond (pellets) is remembered as multi-pellet. */
         static u32 lw_, lt_, multi[16], nm; u32 now = GetTickCount(); u32 ty = readable(w + 0x228, 4) ? *(u32 *)(w + 0x228) : 0;
@@ -1019,13 +1463,19 @@ void aim_fix(u8 *w, float *pos, float *dir) {
         lw_ = (u32)w; lt_ = now;
         for (u32 k = 0; k < nm; k++) if (multi[k] == ty) rad = 18.0f; }
     float a = frand() * 6.2831853f, rr = rad * sqrt_(frand());
-    float px = 320.0f + rr * cos_(a), py = 190.0f + rr * sin_(a);
+    float ry = scoped() ? 240.0f : 190.0f;   /* the scope's crosshair is the screen centre; the over-the-shoulder reticle sits at y 190 */
+    float px = 320.0f + rr * cos_(a), py = ry + rr * sin_(a);
+    if (scoped()) { static u32 nz; if (nz++ < 40) { out("  [scopeshot] offset px x100 "); fo((px - 320.0f) / 1000.0f * 100.0f); fo((py - 240.0f) / 1000.0f * 100.0f); out(" depth "); fo(d01); out("\r\n"); } }
     float sc[4] = {(px - 320.0f) / 320.0f, (240.0f - py) / 240.0f, d01, 1.0f}, X[4];
     for (int r = 0; r < 4; r++) { X[r] = 0; for (int k = 0; k < 4; k++) X[r] += IV[r * 4 + k] * sc[k]; }
     if (X[3] == 0) return; float T[3] = {X[0] / X[3], X[1] / X[3], X[2] / X[3]};
     float v[3] = {T[0] - pos[0], T[1] - pos[1], T[2] - pos[2]}, l = sqrt_(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); if (l < 0.01f) return;
     float od[3] = {dir[0], dir[1], dir[2]};
     for (int k = 0; k < 3; k++) dir[k] = v[k] / l;
+    /* the bullet trail (0x2212E0, after the ray) is drawn from the weapon's own stored direction (+0x25C + barrel x 12), not
+       from the copy the ray gets: write the new direction there too, so the trail follows the shot. notracerfix.txt = off */
+    if (fattr_cached("notracerfix.txt") == 0xFFFFFFFF) for (int ix = 0; ix < 4; ix++) { float *sd = (float *)(w + 0x25C + ix * 12);
+        if (readable(sd, 12) && sd[0] == od[0] && sd[1] == od[1] && sd[2] == od[2]) { sd[0] = dir[0]; sd[1] = dir[1]; sd[2] = dir[2]; break; } }
     static u32 n; if (n < 16) { n++; out("  [aim] slot "); dec((u32)s); out(" d "); fo(d01 * 1000); out("dist "); float e[3] = {T[0] - g_eye_ours[0], T[1] - g_eye_ours[1], T[2] - g_eye_ours[2]}; fo(sqrt_(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]));
         out("old "); fo(od[0]); fo(od[1]); fo(od[2]); out("new "); fo(dir[0]); fo(dir[1]); fo(dir[2]); out("muzzle-eye "); fo(pos[0] - g_eye_ours[0]); fo(pos[1] - g_eye_ours[1]); fo(pos[2] - g_eye_ours[2]); out("\r\n"); }
 }
@@ -1036,7 +1486,7 @@ __attribute__((naked)) static void fb_stub(void) { __asm__ volatile(
    register, dword count; 8 s of counts after 40 s, then a summary */
 static u32 vsc_ra[48], vsc_n[48], vsc_reg[48], vsc_cnt[48], vsc_k, vsc_t0, vsc_done, vsc_on = 2;
 void vsc_log(u32 ra, u32 reg, u32 cnt) {
-    if (vsc_on == 2) vsc_on = GetFileAttributesA("vsclog.txt") != 0xFFFFFFFF; if (!vsc_on || vsc_done || !g_player_char) return;
+    if (vsc_on == 2) vsc_on = fattr_cached("vsclog.txt") != 0xFFFFFFFF; if (!vsc_on || vsc_done || !g_player_char) return;
     u32 t = GetTickCount(); if (!vsc_t0) vsc_t0 = t; if (t - vsc_t0 < 15000) return;
     if (t - vsc_t0 > 23000) { vsc_done = 1; out("  [vsc] uploads of >= 12 dwords (return address, register, dwords, calls):\r\n"); for (u32 k = 0; k < vsc_k; k++) { out("    "); hex(vsc_ra[k]); out(" r"); dec(vsc_reg[k]); out(" n"); dec(vsc_cnt[k]); out(" x"); dec(vsc_n[k]); out("\r\n"); } return; }
     if (cnt < 12) return; u32 k = 0; while (k < vsc_k && !(vsc_ra[k] == ra && vsc_reg[k] == reg && vsc_cnt[k] == cnt)) k++;
@@ -1047,7 +1497,7 @@ __attribute__((naked)) static void vsc_stub(void) { __asm__ volatile(
 /* Milestone 93 probe (bonedump.txt): the skin palette builder 0x95460(bones, index table, count) copies, for each slot,
    the 3x4 matrix at bones + 8 + index x 72. Dumps each big skeleton once after 15 s of play, plus the player's parts. */
 void bone_log(u8 *bones, u8 *idx, u32 cnt) {
-    static u32 on = 2, t0, seen[8], ns; if (on == 2) on = GetFileAttributesA("bonedump.txt") != 0xFFFFFFFF;
+    static u32 on = 2, t0, seen[8], ns; if (on == 2) on = fattr_cached("bonedump.txt") != 0xFFFFFFFF;
     if (!on || !g_player_char || cnt < 20 || ns >= 4) return; u32 t = GetTickCount(); if (!t0) t0 = t; if (t - t0 < 15000) return;
     for (u32 k = 0; k < ns; k++) if (seen[k] == (u32)bones) return; seen[ns++] = (u32)bones;
     out("  [bones] array "); hex((u32)bones); out(" slots "); dec(cnt); out(" index:"); for (u32 k = 0; k < cnt; k++) { out(" "); dec(idx[k]); } out("\r\n");
@@ -1459,7 +1909,7 @@ void razor_probe(u8 *w) {
     out(" | float 48 at:"); for (u32 o = 0; o < 0x400; o += 4) if (*(float *)(t + o) == 48.0f) { out(" +"); hex(o); }
     out(" | CC "); fo(*(float *)(t + 0xCC)); out("D0 "); fo(*(float *)(t + 0xD0)); out("D8 "); fo(*(float *)(t + 0xD8)); out("DC "); dec(*(u32 *)(t + 0xDC)); out("\r\n"); }
 void razor_patch(u8 *w) {   /* the MK-ASLT's type (the only 48-round magazine): 30 rounds, 625 rpm (10.42 shots/s; the second rate scaled alike) */
-    static u32 off = 2; if (off == 2) off = GetFileAttributesA("norazorback.txt") != 0xFFFFFFFF; if (off) return;
+    static u32 off = 2; if (off == 2) off = fattr_cached("norazorback.txt") != 0xFFFFFFFF; if (off) return;
     u8 *t = readable(w + 0x228, 4) ? *(u8 **)(w + 0x228) : 0; if (!t || !readable(t, 0x100)) return;
     if (*(u32 *)(t + 0xE4) == 48 && *(float *)(t + 0xCC) > 7.9f && *(float *)(t + 0xCC) < 8.1f) { *(u32 *)(t + 0xE4) = 30; *(float *)(t + 0xCC) = 625.0f / 60.0f; *(float *)(t + 0xD0) = 6.0f * 625.0f / 480.0f;
         out("  [razor] MK-ASLT type "); hex((u32)t); out(" patched: 30 rounds, 625 rpm\r\n"); }
@@ -1545,7 +1995,7 @@ void pose_apply(u8 *bones) {
            standing (it turns only by turn-in-place motions once the gap is large); the upper body already follows the aim. Every
            bone that is not upper body is turned about the vertical through the hips (bone 1) by aim yaw - bone 0 yaw.
            Once per frame per bone (pose_last). bodylag.txt = the game's own. */
-        static u32 off = 2, tl; u32 nw = GetTickCount(); if (nw - tl > 1000) { tl = nw; off = GetFileAttributesA("bodylag.txt") != 0xFFFFFFFF; }
+        static u32 off = 2, tl; u32 nw = GetTickCount(); if (nw - tl > 1000) { tl = nw; off = fattr_cached("bodylag.txt") != 0xFFFFFFFF; }
         extern u32 g_ctl_tick; float *A = (float *)(c + 0x5BC), *m0 = (float *)(bones + 8);
         extern float g_pose_t;   /* not during the sprint pose (it pivots on the part objects; running, the body already follows the aim) */
         if (!off && g_mouse_on && nw - g_ctl_tick < 300 && g_pose_t < 0.001f) {
@@ -1581,7 +2031,7 @@ void pose_apply(u8 *bones) {
                 if ((f[0] - m0[0]) * (f[0] - m0[0]) < 1e-6f && (f[3] - m0[4]) * (f[3] - m0[4]) < 1e-6f && (f[6] - m0[8]) * (f[6] - m0[8]) < 1e-6f) { out(" +"); hex(o); out("c"); } }
             out("\r\n"); } }
     {   /* weapon probe (gunprobe.txt): the character field holding his current weapon, and the weapon's part objects */
-        static u32 on = 2, done, t0; if (on == 2) on = GetFileAttributesA("gunprobe.txt") != 0xFFFFFFFF;
+        static u32 on = 2, done, t0; if (on == 2) on = fattr_cached("gunprobe.txt") != 0xFFFFFFFF;
         extern u8 *g_pweapon; if (on && done < 2 && g_mouse_on && g_pweapon) { u32 t = GetTickCount(); if (!t0) t0 = t; if (t - t0 > 4000 + done * 2000) { done++;
             u8 *hand = *(u8 **)(c + 0x3FC); float *hp = (float *)(hand + 0x38); out("  [gun] gun hand part "); hex((u32)hand); out(" at "); fo(hp[0]); fo(hp[1]); fo(hp[2]); out("\r\n");
             for (u32 o = 0; o < 4; o += 4) { u32 w = (u32)g_pweapon; for (u32 f = 0; f < 0x1000; f += 4) if (*(u32 *)(c + f) == w) { out("   char+"); hex(f); out(" holds it"); }
@@ -1590,11 +2040,11 @@ void pose_apply(u8 *bones) {
                 for (u32 q = 0; q < 0x800; q += 4) { u8 *p = *(u8 **)(w + q); if (part_like(p, hp)) { float *pp = (float *)(p + 0x38); out("     w+"); hex(q); out(" part "); hex((u32)p); out(" rel hand "); fo(pp[0] - hp[0]); fo(pp[1] - hp[1]); fo(pp[2] - hp[2]); out("\r\n"); } }
                 float *wx = ((float *(__thiscall *)(void *))(*(u32 **)w)[0x40 / 4])((void *)w); out("     weapon vfunc40 xform pos rel hand "); fo(wx[9] - hp[0]); fo(wx[10] - hp[1]); fo(wx[11] - hp[2]); out(" ptr "); hex((u32)wx); out("\r\n"); } } } }
     { void joint_check(u8 *); extern float g_pose_t; if (g_pose_t < 0.001f) joint_check(bones); }   /* only on unposed bones */
-    {   static u32 fp, tlf; u32 nf = GetTickCount(); if (nf - tlf > 1000) { tlf = nf; fp = GetFileAttributesA("forcepose.txt") != 0xFFFFFFFF; } if (fp) { extern float g_pose_t; g_pose_t = 1.0f; } }   /* test: hold the sprint pose */
+    {   static u32 fp, tlf; u32 nf = GetTickCount(); if (nf - tlf > 1000) { tlf = nf; fp = fattr_cached("forcepose.txt") != 0xFFFFFFFF; } if (fp) { extern float g_pose_t; g_pose_t = 1.0f; } }   /* test: hold the sprint pose */
     int noctl = 0;   /* no player input (cutscene, mouse not captured): no poses, but the Razorback's left hand still holds the gun (Milestone 95) */
-    {   extern u32 g_ctl_tick; if (GetTickCount() - g_ctl_tick > 300 && GetFileAttributesA("forcepose.txt") == 0xFFFFFFFF) { extern float g_pose_t, g_aim_t; g_pose_t = 0; noctl = 1; } }
+    {   extern u32 g_ctl_tick; if (GetTickCount() - g_ctl_tick > 300 && fattr_cached("forcepose.txt") == 0xFFFFFFFF) { extern float g_pose_t, g_aim_t; g_pose_t = 0; noctl = 1; } }
     {   extern float g_pose_t; extern u8 *g_gun_part; extern float g_gun_orig[12];
-        extern float g_aim_t; static u32 noaimpose2 = 2; if (noaimpose2 == 2) noaimpose2 = GetFileAttributesA("aimpose_on.txt") == 0xFFFFFFFF;   /* the aim pose is off unless aimpose_on.txt exists (user: more trouble than it was worth) */
+        extern float g_aim_t; static u32 noaimpose2 = 2; if (noaimpose2 == 2) noaimpose2 = fattr_cached("aimpose_on.txt") == 0xFFFFFFFF;   /* the aim pose is off unless aimpose_on.txt exists (user: more trouble than it was worth) */
         if (g_pose_t < 0.001f && (g_aim_t < 0.001f || noaimpose2) && g_gun_part && readable(g_gun_part + 0x14, 0x30)) {   /* both poses off */   /* the pose has ended: if the rifle part still holds our last output, put the animation's placement back */
             float *R = (float *)(g_gun_part + 0x14), *T = (float *)(g_gun_part + 0x38); int same = 1;
             for (int r = 0; r < 3 && same; r++) { if (R[r * 3] != gun_last[r * 4] || R[r * 3 + 1] != gun_last[r * 4 + 1] || R[r * 3 + 2] != gun_last[r * 4 + 2] || T[r] != gun_last[r * 4 + 3]) same = 0; }
@@ -1627,11 +2077,11 @@ void pose_apply(u8 *bones) {
                             out("  [lhold] aim "); dec(g_aiming); out(" fire "); dec((u32)fire); out(" razor "); dec((u32)rz); out(" gun-wrist mm "); dec((u32)(dd * 1000)); out(" hold x1000 "); dec((u32)(lh_t * 1000)); out("\r\n"); } }
                     if (lh_t <= 0) rz = 0; }
                 float *m56 = (float *)(bones + 8 + 56 * 72); static float ikl[12]; int done = 1; for (int q = 0; q < 12; q++) if (m56[q] != ikl[q]) { done = 0; break; }
-                g_ik_skin = GetFileAttributesA("razorhand_parts.txt") == 0xFFFFFFFF;   /* A/B: the old part-object joints */
+                g_ik_skin = fattr_cached("razorhand_parts.txt") == 0xFFFFFFFF;   /* A/B: the old part-object joints */
                 float WLv[3], WRv[3], SLv[3], ELv[3], *WL = 0, *WR = 0, *SL = 0, *EL = 0, *t;
                 if ((t = part_pos(bones, 56))) { for (int k = 0; k < 3; k++) WLv[k] = t[k]; WL = WLv; } if ((t = part_pos(bones, 57))) { for (int k = 0; k < 3; k++) WRv[k] = t[k]; WR = WRv; }
                 if ((t = part_pos(bones, 28))) { for (int k = 0; k < 3; k++) SLv[k] = t[k]; SL = SLv; } if ((t = part_pos(bones, 51))) { for (int k = 0; k < 3; k++) ELv[k] = t[k]; EL = ELv; }
-                if (rz && !done && (hb != 0 || hd2 != 0) && WL && WR && SL && EL && GetFileAttributesA("norazorback.txt") == 0xFFFFFFFF) {
+                if (rz && !done && (hb != 0 || hd2 != 0) && WL && WR && SL && EL && fattr_cached("norazorback.txt") == 0xFFFFFFFF) {
                     float d[3] = {WR[0] - WL[0], WR[1] - WL[1], WR[2] - WL[2]}, l = sqrt_(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
                     /* the hand is held at a fixed place on the gun: captured once in the rifle part's frame (+0x14 rotation rows, +0x38
                        position) while he stands calmly, then followed every frame, so the turn animations no longer move it */
@@ -1693,13 +2143,13 @@ void pose_apply(u8 *bones) {
                             { float r0 = GT[0] - SL[0], r1 = GT[1] - SL[1], r2 = GT[2] - SL[2]; float g0 = r0 - lg[0], g1 = r1 - lg[1], g2 = r2 - lg[2]; g = sqrt_(g0 * g0 + g1 * g1 + g2 * g2); lg[0] = r0; lg[1] = r1; lg[2] = r2;
                               float t0 = T[0] - SL[0], t1 = T[1] - SL[1], t2 = T[2] - SL[2]; rr = sqrt_(t0 * t0 + t1 * t1 + t2 * t2); }
                             if (e > mxe) mxe = e; if (g > mxg && g < 0.5f) mxg = g; if (rr > mxr) mxr = rr;
-                            static u32 lhlog = 2; if (lhlog == 2) lhlog = GetFileAttributesA("lefthandlog.txt") != 0xFFFFFFFF;
+                            static u32 lhlog = 2; if (lhlog == 2) lhlog = fattr_cached("lefthandlog.txt") != 0xFFFFFFFF;
                             if (lhlog && nn - tlh > 2000) { tlh = nn; out("  [lefthand] off target mm "); dec((u32)(mxe * 1000)); out(" gun move vs shoulder per frame mm "); dec((u32)(mxg * 1000)); out(" farthest target from shoulder mm "); dec((u32)(mxr * 1000)); out("\r\n"); mxe = mxg = mxr = 0; } } } }
                 lh_end: g_ik_skin = 0; }
             if (!noaimpose2) { void grip_try(u8 *); grip_try(bones); } } }   /* only while both poses are off: the two-handed grip whenever both hands are on the rifle */
     if (noctl) return;
-    {   extern float g_pose_t; static u32 nopose = 2; if (nopose == 2) nopose = GetFileAttributesA("nosprintpose.txt") != 0xFFFFFFFF;
-        extern float g_aim_t; static u32 noaimpose = 2; if (noaimpose == 2) noaimpose = GetFileAttributesA("aimpose_on.txt") == 0xFFFFFFFF;
+    {   extern float g_pose_t; static u32 nopose = 2; if (nopose == 2) nopose = fattr_cached("nosprintpose.txt") != 0xFFFFFFFF;
+        extern float g_aim_t; static u32 noaimpose = 2; if (noaimpose == 2) noaimpose = fattr_cached("aimpose_on.txt") == 0xFFFFFFFF;
         if (!on && !noaimpose && g_aim_t > 0.001f && g_pose_t < 0.001f) {   /* Milestone 93: shouldered aim (pose_aim) */
             static u32 tt; u32 now = GetTickCount(); if (now - tt > 1000) { tt = now; HANDLE f = CreateFileA("aimpose.txt", 0x80000000, 1, 0, 3, 0x80, 0);
                 if (f != (HANDLE)-1) { char s[48] = {0}; DWORD n = 0; ReadFile(f, s, 47, &n, 0); CloseHandle(f); float v[3] = {aim_butt * 1000, aim_up * 1000, aim_side * 1000}, x = 0; int k = 0, neg = 0, any = 0;
@@ -1769,7 +2219,7 @@ __attribute__((naked)) static void bone_stub(void) { __asm__ volatile(
    aim's heading (pi - aim yaw) and +0x5FC (a rate set per frame by 0x11E950) is 1000, so the step is the whole gap.
    bodylag.txt = the game's own turning. */
 void body_target(u8 *c) {
-    static u32 off = 2, tl; u32 nw = GetTickCount(); if (nw - tl > 1000) { tl = nw; off = GetFileAttributesA("bodylag.txt") != 0xFFFFFFFF; }
+    static u32 off = 2, tl; u32 nw = GetTickCount(); if (nw - tl > 1000) { tl = nw; off = fattr_cached("bodylag.txt") != 0xFFFFFFFF; }
     if (off || c != (u8 *)g_player_char || !g_mouse_on || *(u32 *)(c + 0x604) || *(u32 *)(c + 0x638)) return;
     float *A = (float *)(c + 0x5BC), h = 3.14159265f - atan2_ext(A[6], A[0]); while (h < 0) h += 6.2831853f; while (h >= 6.2831853f) h -= 6.2831853f;
     *(float *)(c + 0x4A0) = h; *(float *)(c + 0x5FC) = 1000.0f; }
@@ -1784,7 +2234,7 @@ __attribute__((naked)) static void body_stub(void) { __asm__ volatile(
 static float g_aspect = 0;
 void cam_widen(u8 *pr) {
     if (g_aspect == 0) { g_aspect = 1.7777778f; IMP HANDLE WINAPI CreateFileA(const char *, DWORD, DWORD, void *, DWORD, DWORD, HANDLE); IMP BOOL WINAPI ReadFile(HANDLE, void *, DWORD, DWORD *, void *); IMP BOOL WINAPI CloseHandle(HANDLE);
-        if (GetFileAttributesA("nowide.txt") != 0xFFFFFFFF) g_aspect = 1.3333333f;
+        if (fattr_cached("nowide.txt") != 0xFFFFFFFF) g_aspect = 1.3333333f;
         else { HANDLE f = CreateFileA("aspect.txt", 0x80000000, 1, 0, 3, 0x80, 0); if (f != (HANDLE)-1) { char t[16] = {0}; DWORD n = 0; ReadFile(f, t, 15, &n, 0); CloseHandle(f);
             float v = 0, sc = 0; for (DWORD i = 0; i < n; i++) { if (t[i] >= 0x30 && t[i] <= 0x39) { if (sc) { v += (t[i] - 0x30) * sc; sc *= 0.1f; } else v = v * 10 + (t[i] - 0x30); } else if (t[i] == '.') sc = 0.1f; } if (v > 1.0f && v < 4.0f) g_aspect = v; } }
         out("  [wide] aspect x1000 "); dec((u32)(g_aspect * 1000)); out("\r\n"); }
@@ -1836,7 +2286,34 @@ __attribute__((naked)) static void widen_old2(void) { __asm__ volatile(
 static void hit_note(u8 *w, u32 hit, u32 path);
 static u32 (__stdcall *g_bray)(u32, u32, u32, u32, u32, u32) = (u32 (__stdcall *)(u32, u32, u32, u32, u32, u32))0x230040;
 u32 __stdcall bray_wrap(u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5) {
+    {   /* the hit ray starts near Flint and points along her facing, not along the aim the loader chose: for a zoomed shot or a special's
+           locked shot (g_zT set by aim_fix within 0.2 s) it is steered at that point. Only a ray starting within 3 m of Flint (the player's) */
+        extern float g_zT[3]; extern u32 g_zT_t;
+        if (g_zT_t && GetTickCount() - g_zT_t < 200 && g_player_char && a2 > 0x10000 && a3 > 0x10000 && readable((void *)a2, 12) && readable((void *)a3, 12)) {
+            u8 *pc = (u8 *)g_player_char; float *pp = ((float *(__thiscall *)(void *))(*(u32 **)pc)[0x40 / 4])(pc) + 9;
+            float *o = (float *)a2, *d = (float *)a3, e[3] = {o[0] - pp[0], o[1] - pp[1], o[2] - pp[2]};
+            if (e[0] * e[0] + e[1] * e[1] + e[2] * e[2] < 9.0f) { float v[3] = {g_zT[0] - o[0], g_zT[1] - o[1], g_zT[2] - o[2]}, l = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+                if (l > 1.0f) { float sl; __asm__("fsqrt" : "=t"(sl) : "0"(l)); for (int q = 0; q < 3; q++) d[q] = v[q] / sl; } } } }
+    if (scoped()) { static u32 nl; if (nl++ < 24) {   /* probe: the hitscan's arguments while zoomed - which are points/directions (floats) */
+        extern float g_eye_ours[3]; out("  [bray] zoomed args"); u32 ar[6] = {a0, a1, a2, a3, a4, a5};
+        for (int i = 1; i < 6; i++) { out(" |"); hex(ar[i]); if (ar[i] > 0x10000 && readable((void *)ar[i], 24)) { float *f = (float *)ar[i]; for (int q = 0; q < 6; q++) { s32 v = (s32)(f[q] * 1000); out(" "); if (v < 0) { out("-"); v = -v; } dec((u32)v); } } }
+        out(" | eye"); for (int q = 0; q < 3; q++) { s32 v = (s32)(g_eye_ours[q] * 1000); out(" "); if (v < 0) { out("-"); v = -v; } dec((u32)v); } out("\r\n"); } }
+    float zr0 = (a5 > 0x10000 && readable((void *)a5, 4)) ? *(float *)a5 : 0;
+    int steered_ = 0; { extern u32 g_zT_t; steered_ = g_zT_t && GetTickCount() - g_zT_t < 200; }
     u32 r = g_bray(a0, a1, a2, a3, a4, a5);
+    if (steered_ && lock_mode() && a4 > 0x10000 && readable((void *)(a4 + 0x44), 4)) {   /* a locked shot that hit cover: the next shot tries another part of
+        the target (head, hips, left, right; kept while it hits). Retrying within one shot crashed the game (the target hit twice) */
+        extern int g_aim_part; u8 *lock_target(void); u8 *tg = lock_target(); u32 h0 = *(u32 *)(a4 + 0x44);
+        (void)tg; (void)h0; g_aim_part = 0; }   /* (off: aiming at the head after a miss went over shorter enemies) */
+    if (steered_ && lock_mode()) { static u32 nl; if (nl++ < 60) { u32 hit = (a4 > 0x10000 && readable((void *)(a4 + 0x44), 4)) ? *(u32 *)(a4 + 0x44) : 0; u8 *lock_target(void);
+        out("  [lockray] hit "); hex(hit); out(hit && hit == (u32)lock_target() ? " = the target" : hit ? " (something else)" : " (nothing)"); out(" range left x10 "); if (a5 > 0x10000 && readable((void *)a5, 4)) dec((u32)(*(float *)a5 * 10)); out("\r\n"); } }
+    {   /* zoomed: the trail (drawn after this from the weapon's stored direction) from the gun to where the hit ray ended (range left in *a5) */
+        extern float g_zM0[3]; extern float *g_zsd; extern u32 g_zT_t;
+        if (g_zsd && g_zT_t && GetTickCount() - g_zT_t < 200 && a2 > 0x10000 && a3 > 0x10000 && a5 > 0x10000 && readable((void *)a5, 4) && readable(g_zsd, 12)) {
+            float *o = (float *)a2, *d = (float *)a3, R = *(float *)a5; if (!(R > 0.5f && R <= zr0)) R = zr0 > 1.0f ? zr0 : 100.0f;
+            float v[3] = {o[0] + d[0] * R - g_zM0[0], o[1] + d[1] * R - g_zM0[1], o[2] + d[2] * R - g_zM0[2]}, l = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+            if (l > 0.25f) { float sl; __asm__("fsqrt" : "=t"(sl) : "0"(l)); for (int q = 0; q < 3; q++) g_zsd[q] = v[q] / sl; }
+            static u32 nl; if (nl++ < 20) { out("  [bray] zoomed hit range x10 "); dec((u32)(R * 10)); out(" of "); dec((u32)(zr0 * 10)); out(r ? " hit" : " none"); out("\r\n"); } g_zsd = 0; } }
     /* the result: +0x34 the shooter, +0x44 the object hit (a character when [[obj +0xC] +4] == 3, as 0x2303A0 checks before
        its body-part damage) */
     if (r && a4 > 0x10000 && a4 < 0x7FFE0000u && readable((void *)(a4 + 0x44), 4)) { u32 hit = *(u32 *)(a4 + 0x44); if (hit) hit_note((u8 *)a0, hit, 1); }
@@ -1847,6 +2324,15 @@ u32 __stdcall bray_wrap(u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5) {
 static u32 (__stdcall *g_bray2)(u32, u32, u32, u32, u32, u32, u32) = (u32 (__stdcall *)(u32, u32, u32, u32, u32, u32, u32))0x230400;
 static void hit_note(u8 *w, u32 hit, u32 path);
 u32 __stdcall bray2_wrap(u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6) {
+    {   /* the pass-through bullet path (Flint's rifle?) gets the same steering as bray_wrap: origin a2, direction a3 - only when they look
+           like that (a unit direction, an origin within 3 m of the player) and right after a steered shot */
+        extern float g_zT[3]; extern u32 g_zT_t; static u32 nl;
+        if (g_zT_t && GetTickCount() - g_zT_t < 200 && g_player_char && a2 > 0x10000 && a3 > 0x10000 && readable((void *)a2, 12) && readable((void *)a3, 12)) {
+            u8 *pc = (u8 *)g_player_char; float *pp = ((float *(__thiscall *)(void *))(*(u32 **)pc)[0x40 / 4])(pc) + 9;
+            float *o = (float *)a2, *d = (float *)a3, e[3] = {o[0] - pp[0], o[1] - pp[1], o[2] - pp[2]}, dl = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            if (e[0] * e[0] + e[1] * e[1] + e[2] * e[2] < 9.0f && dl > 0.9f && dl < 1.1f) { float v[3] = {g_zT[0] - o[0], g_zT[1] - o[1], g_zT[2] - o[2]}, l = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+                if (l > 1.0f) { float sl; __asm__("fsqrt" : "=t"(sl) : "0"(l)); for (int q = 0; q < 3; q++) d[q] = v[q] / sl; if (nl++ < 20) out("  [bray2] steered at the target\r\n"); } }
+            else if (nl++ < 20) out("  [bray2] arguments do not look like origin / direction\r\n"); } }
     u32 *rec = 0, n = 0;
     if (a4 > 0x10000 && a4 < 0x7FFE0000u && readable((void *)(a4 + 4), 8)) { u32 b = *(u32 *)(a4 + 4), e = *(u32 *)(a4 + 8);
         if (b > 0x10000 && e > b && e - b <= 64 && readable((void *)b, e - b)) { rec = (u32 *)b; n = (e - b) / 4; if (n > a6) n = a6; } }
@@ -1871,7 +2357,7 @@ static void hit_note(u8 *w, u32 hit, u32 path) {
         float before = k < 16 ? seen[k] : 1.0f; if (k == 16) { k = rr++ & 15; who[k] = hit; } seen[k] = hp;
         if (!(hp > 0.0f) && !(before > 0.0f)) return; }
     static u32 last; u32 now = GetTickCount(); if (now - last > 70) { last = now; void snd_hitmarker(void); snd_hitmarker(); }
-    { u32 *pd = gpu_pad(); if (pd && GetFileAttributesA("nohitmark.txt") == 0xFFFFFFFF) pd[56] = now | 1; }   /* the viewer draws the hit marker (bfgl.c) */
+    { u32 *pd = gpu_pad(); if (pd && fattr_cached("nohitmark.txt") == 0xFFFFFFFF) pd[56] = now | 1; }   /* the viewer draws the hit marker (bfgl.c) */
     static u32 nl; if (nl < 20) { nl++; out("  [hit] player hit character "); hex(hit); out(path == 2 ? " (pass-through path)\r\n" : "\r\n"); } }
 void hs_fix(u32 *s) { aim_fix((u8 *)s[1], (float *)s[3], (float *)s[4]); }
 __attribute__((naked)) static void hs_stub(void) { __asm__ volatile(
@@ -1890,10 +2376,10 @@ __attribute__((naked)) static void bullet_stub(void) { __asm__ volatile(
     "pushal\n\t leal 32(%esp), %eax\n\t pushl %eax\n\t call _bullet_fix\n\t addl $4, %esp\n\t popal\n\t"
     "movl 0x20(%esp), %eax\n\t movl 0x1c(%esp), %ecx\n\t pushl $0x22BC6C\n\t ret"); }
 void input_patch(void) {
-    if (GetFileAttributesA("nogamehooks.txt") != 0xFFFFFFFF) { out("Game hooks: all off (nogamehooks.txt)\r\n"); goto essential; }   /* test switch (Milestone 97): the clock and input patches stay */
+    if (fattr_cached("nogamehooks.txt") != 0xFFFFFFFF) { out("Game hooks: all off (nogamehooks.txt)\r\n"); goto essential; }   /* test switch (Milestone 97): the clock and input patches stay */
     {   u8 *p = (u8 *)0x22BC64; static const u8 e[8] = {0x8B, 0x44, 0x24, 0x20, 0x8B, 0x4C, 0x24, 0x1C}; int ok = 1; for (int k = 0; k < 8; k++) if (p[k] != e[k]) ok = 0;
         if (ok) { p[0] = 0xE9; *(u32 *)(p + 1) = (u32)bullet_stub - (0x22BC64 + 5); p[5] = p[6] = p[7] = 0x90; out("Bullet hook: on\r\n"); } else out("Bullet hook: bytes differ\r\n"); }
-    if (GetFileAttributesA("noweaponhook.txt") == 0xFFFFFFFF) {   u8 *p = (u8 *)0x22EE30; static const u8 e[9] = {0x56, 0x8B, 0xF1, 0x8B, 0x86, 0x28, 0x02, 0x00, 0x00}; int ok = 1; for (int k = 0; k < 9; k++) if (p[k] != e[k]) ok = 0;
+    if (fattr_cached("noweaponhook.txt") == 0xFFFFFFFF) {   u8 *p = (u8 *)0x22EE30; static const u8 e[9] = {0x56, 0x8B, 0xF1, 0x8B, 0x86, 0x28, 0x02, 0x00, 0x00}; int ok = 1; for (int k = 0; k < 9; k++) if (p[k] != e[k]) ok = 0;
         if (ok) { p[0] = 0xE9; *(u32 *)(p + 1) = (u32)wup_stub - (0x22EE30 + 5); for (int k = 5; k < 9; k++) p[k] = 0x90; out("Weapon update hook: on\r\n"); } else out("Weapon update hook: bytes differ\r\n"); }
     {   u8 *p = (u8 *)0x95460; static const u8 e[9] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x04, 0x09, 0x00, 0x00}; int ok = 1; for (int k = 0; k < 9; k++) if (p[k] != e[k]) ok = 0;
         if (ok) { p[0] = 0xE9; *(u32 *)(p + 1) = (u32)bone_stub - (0x95460 + 5); for (int k = 5; k < 9; k++) p[k] = 0x90; out("Bone probe: on\r\n"); } else out("Bone probe: bytes differ\r\n"); }
@@ -1901,8 +2387,8 @@ void input_patch(void) {
         for (int k = 0; k < 5; k++) if (p1[k] != e1[k]) ok = 0; for (int k = 0; k < 6; k++) if (p2[k] != e2[k]) ok = 0;
         /* Milestone 99: the in-game widening is OFF by default - with it the view kept pulling further back after sprinting (an A/B run
            with it off fixed that). wide.txt = culling-only widening + the viewer's squeeze; oldwide.txt = the Milestone 96 widening. */
-        if (GetFileAttributesA("wide.txt") == 0xFFFFFFFF && GetFileAttributesA("oldwide.txt") == 0xFFFFFFFF) { out("Widescreen camera hooks: off (wide.txt turns them on)\r\n"); ok = 0; p1 = p2 = 0; }
-        int old = GetFileAttributesA("oldwide.txt") != 0xFFFFFFFF; u32 s1 = old ? (u32)widen_old1 : (u32)widen_stub1, s2 = old ? (u32)widen_old2 : (u32)widen_stub2;
+        if (fattr_cached("wide.txt") == 0xFFFFFFFF && fattr_cached("oldwide.txt") == 0xFFFFFFFF) { out("Widescreen camera hooks: off (wide.txt turns them on)\r\n"); ok = 0; p1 = p2 = 0; }
+        int old = fattr_cached("oldwide.txt") != 0xFFFFFFFF; u32 s1 = old ? (u32)widen_old1 : (u32)widen_stub1, s2 = old ? (u32)widen_old2 : (u32)widen_stub2;
         /* Milestone 99: by default only the culling planes (0x6AD00) are widened, and only while they are built; the projection
            (0x6AB30) stays the game's 4:3 one and the viewer squeezes the 3D scene horizontally (bfgl.c). The game copied the widened
            projection back into its own field of view, which compounded with the sprint zoom (the view kept pulling back). */
@@ -1910,18 +2396,24 @@ void input_patch(void) {
         if (ok) { p1[0] = 0xE9; *(u32 *)(p1 + 1) = s1 - (0x6AB30 + 5); p2[0] = 0xE9; *(u32 *)(p2 + 1) = s2 - (0x6AD00 + 5); p2[5] = 0x90; out("Widescreen camera hooks: on\r\n"); } else if (p1) out("Widescreen camera hooks: bytes differ\r\n"); }
     {   u8 *p = (u8 *)0x11D7F7; static const u8 e[10] = {0x8B, 0x74, 0x24, 0x0C, 0xD9, 0x86, 0xA0, 0x04, 0x00, 0x00}; int ok = 1; for (int k = 0; k < 10; k++) if (p[k] != e[k]) ok = 0;
         if (ok) { p[0] = 0xE9; *(u32 *)(p + 1) = (u32)body_stub - (0x11D7F7 + 5); for (int k = 5; k < 10; k++) p[k] = 0x90; out("Body turn hook: on\r\n"); } else out("Body turn hook: bytes differ\r\n"); }
-    if (GetFileAttributesA("vsclog.txt") != 0xFFFFFFFF) { static const u8 e[6] = {0x56, 0x57, 0x8B, 0x3D, 0x40, 0xBD}; if (hook6(0x36F6C0, vsc_stub, e)) out("VS constant probe: on\r\n"); }
+    if (fattr_cached("vsclog.txt") != 0xFFFFFFFF) { static const u8 e[6] = {0x56, 0x57, 0x8B, 0x3D, 0x40, 0xBD}; if (hook6(0x36F6C0, vsc_stub, e)) out("VS constant probe: on\r\n"); }
     {   static const u8 e[6] = {0x83, 0xEC, 0x60, 0x53, 0x32, 0xDB}; if (hook6(0x22F1D0, fb_stub, e)) out("Fire probe: on\r\n"); else out("Fire probe: bytes differ\r\n"); }
+    {   /* performance (Nov 21): D3D's write-combine flush 0x372180 sets bit 16 of the GPU register 0x100410 and polls it until clear - three
+           reads/writes of a trapped page (three Windows exceptions) per call, called constantly: the game thread spent most of its time in
+           exception dispatch (~42 fps in busy scenes). The emulated flush is done at once (kernel2.c reg_rd), so it becomes sfence; ret.
+           wcflushtrap.txt = the original */
+        u8 *p = (u8 *)0x372180; if (p[0] == 0xA1 && *(u32 *)(p + 1) == 0x37DD88 && p[0x2C] == 0xC3 && GetFileAttributesA("wcflushtrap.txt") == 0xFFFFFFFF) {
+            p[0] = 0x0F; p[1] = 0xAE; p[2] = 0xF8; p[3] = 0xC3; out("Write-combine flush: no register trap\r\n"); } }
     {   u8 *p = (u8 *)0x2309ED; if (p[0] == 0xE8 && (u32)(p + 5) + *(s32 *)(p + 1) == 0x230040) { *(s32 *)(p + 1) = (s32)((u32)bray_wrap - (0x2309ED + 5)); out("Hit marker hook: on\r\n"); } else out("Hit marker hook: bytes differ\r\n"); }
     {   u8 *p = (u8 *)0x2309CB; if (p[0] == 0xE8 && (u32)(p + 5) + *(s32 *)(p + 1) == 0x230400) { *(s32 *)(p + 1) = (s32)((u32)bray2_wrap - (0x2309CB + 5)); out("Hit marker hook 2: on\r\n"); } else out("Hit marker hook 2: bytes differ\r\n"); }
     {   u8 *p = (u8 *)0x231868; if (p[0] == 0xE8 && (u32)(p + 5) + *(s32 *)(p + 1) == 0x230860) { *(s32 *)(p + 1) = (s32)((u32)hs_stub - (0x231868 + 5)); out("Hitscan aim hook: on\r\n"); } else out("Hitscan aim hook: bytes differ\r\n"); }
     {   u8 *p = (u8 *)0x12CA48; static const u8 e[9] = {0x8B, 0x4D, 0x08, 0xD9, 0x81, 0x78, 0x04, 0x00, 0x00}; int ok = 1; for (int k = 0; k < 9; k++) if (p[k] != e[k]) ok = 0;
         if (ok) { p[0] = 0xE9; *(u32 *)(p + 1) = (u32)sprint_stub - (0x12CA48 + 5); for (int k = 5; k < 9; k++) p[k] = 0x90; out("Sprint (Left Shift): on\r\n"); } }
-    if (GetFileAttributesA("camxflog.txt") != 0xFFFFFFFF) { u8 *p = (u8 *)0x2338C0; if (p[0] == 0x53 && p[1] == 0x8B && p[2] == 0x4C && p[3] == 0x24 && p[4] == 0x10) { p[0] = 0xE9; *(u32 *)(p + 1) = (u32)mul_stub - (0x2338C0 + 5); g_xf_log = GetFileAttributesA("camxflog.txt") != 0xFFFFFFFF; out("Camera transform hook: on\r\n"); } }
-    out(GetFileAttributesA("gamecamera.txt") == 0xFFFFFFFF ? "Camera: Division-style (gamecamera.txt for the game's own)\r\n" : "Camera: the game's own (gamecamera.txt)\r\n");
-    if (GetFileAttributesA("viewdump.txt") != 0xFFFFFFFF) { u8 *p = (u8 *)0x6C370; if (p[0] == 0xBA) { p[0] = 0xE9; *(u32 *)(p + 1) = (u32)view_stub - (0x6C370 + 5); g_view_dump = 1; } }
+    if (fattr_cached("camxflog.txt") != 0xFFFFFFFF) { u8 *p = (u8 *)0x2338C0; if (p[0] == 0x53 && p[1] == 0x8B && p[2] == 0x4C && p[3] == 0x24 && p[4] == 0x10) { p[0] = 0xE9; *(u32 *)(p + 1) = (u32)mul_stub - (0x2338C0 + 5); g_xf_log = fattr_cached("camxflog.txt") != 0xFFFFFFFF; out("Camera transform hook: on\r\n"); } }
+    out(fattr_cached("gamecamera.txt") == 0xFFFFFFFF ? "Camera: Division-style (gamecamera.txt for the game's own)\r\n" : "Camera: the game's own (gamecamera.txt)\r\n");
+    if (fattr_cached("viewdump.txt") != 0xFFFFFFFF) { u8 *p = (u8 *)0x6C370; if (p[0] == 0xBA) { p[0] = 0xE9; *(u32 *)(p + 1) = (u32)view_stub - (0x6C370 + 5); g_view_dump = 1; } }
     { u32 *vt = (u32 *)(0x3A2640 + 0x6C); if (*vt == 0x702A0) { *vt = (u32)cam_stub; out("Follow camera update wrapped\r\n"); } }
-    if (GetFileAttributesA("aimassist.txt") == 0xFFFFFFFF) {
+    if (fattr_cached("aimassist.txt") == 0xFFFFFFFF) {
         static const u8 e1[6] = {0x83, 0xEC, 0x08, 0x8B, 0x50, 0x08}, e2[6] = {0x8B, 0x83, 0x38, 0x06, 0x00, 0x00};
         static const u8 e3[6] = {0xD9, 0x85, 0xDC, 0x07, 0x00, 0x00};
         u32 n = hook6(0x11E570, move_stub, e1) + hook6(0xC4E70, lock_stub1, e2) + hook6(0xC4EC0, lock_stub2, e2) + hook6(0x13389D, friction_stub, e3);

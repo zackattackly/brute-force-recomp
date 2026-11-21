@@ -267,6 +267,11 @@ static s32 wait_objs_(u32 n, DHDR **objs, u32 all, s64 *timeout, void *caller) {
         else for (u32 k = 0; k < n; k++) if (try_take(objs[k])) return k;
         if (timeout && now100() >= end) return ST_TIMEOUT;
         Sleep(spin < 50 ? 0 : 1);
+        /* deadlock guard (a freeze after 24 min): D3D's push-buffer wait (0x371DFB, on device + 0x196C) waits for the GPU interrupt that
+           says it caught up; once that signal was lost while the GPU had nothing left to do, the game waited forever. After 0.5 s with
+           the GPU idle, the event is set (what the interrupt would have done). */
+        if (spin >= 500 && (spin % 100) == 0 && caller == (void *)0x00371DFB && n == 1 && (u32)objs[0] >= 0x10000) { int gpu_has_work(void);
+            if (!gpu_has_work()) { objs[0]->signal = 1; static u32 nu; if (nu++ < 50) { out("  [unstuck] D3D push-buffer wait released (GPU idle, its signal was lost)\r\n"); } } }
         if (spin == 2000) { static u32 nl; if (nl++ < 20) { out("  long Ke wait (2 s+) from "); hex((u32)caller); out(":"); for (u32 k = 0; k < n && k < 4; k++) { out(" "); hex((u32)objs[k]); if ((u32)objs[k] >= 0x10000) { out(" type "); dec(objs[k]->type); out(" signal "); dec(objs[k]->signal); } } out(timeout ? " (timeout)\r\n" : " (forever)\r\n"); } }
     }
 }
@@ -645,6 +650,14 @@ static u32 alu(u32 *c, int op, u32 a, u32 b, u32 sz) {
 static u32 g_unknown_ops;
 int mmio_fault(u32 addr, u32 *c) {
     if (addr < 0xFD000000 || addr >= 0xFF000000 || trap_index(addr - 0xFD000000) < 0) return 0;
+    {   /* trap statistics (performance, Nov 21): the busiest register offsets and faulting game instructions, every 10 s */
+        static u32 ko[32], kn[32], ki[32], kin[32], t0; u32 o = addr - 0xFD000000, e = c[0xB8 / 4]; int j;
+        for (j = 0; j < 32 && ko[j] && ko[j] != o; j++) ; if (j < 32) { ko[j] = o; kn[j]++; }
+        for (j = 0; j < 32 && ki[j] && ki[j] != e; j++) ; if (j < 32) { ki[j] = e; kin[j]++; }
+        u32 now = GetTickCount(); if (!t0) t0 = now; if (now - t0 > 10000) { t0 = now; static u32 nl; if (nl++ < 30) {
+            out("  [traps] 10 s by register:"); for (int q = 0; q < 8; q++) { u32 bi = 0, bv = 0; for (int i = 0; i < 32; i++) if (kn[i] > bv) { bv = kn[i]; bi = i; } if (!bv) break; out(" "); hex(ko[bi]); out(":"); dec(bv); kn[bi] = 0; }
+            out(" | by instruction:"); for (int q = 0; q < 8; q++) { u32 bi = 0, bv = 0; for (int i = 0; i < 32; i++) if (kin[i] > bv) { bv = kin[i]; bi = i; } if (!bv) break; out(" "); hex(ki[bi]); out(":"); dec(bv); kin[bi] = 0; }
+            out("\r\n"); } for (int i = 0; i < 32; i++) { ko[i] = 0; kn[i] = 0; ki[i] = 0; kin[i] = 0; } } }
     u8 *ip = (u8 *)c[0xB8 / 4], *p = ip; u32 sz = 4; int op2 = 0;
     if (*p == 0x66) { sz = 2; p++; }
     u8 op = *p++;

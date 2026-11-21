@@ -170,6 +170,49 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
 - Waits/ping (Nov 19): terrain box reports are written at once in do_zpass (no GPU wait); the probe reads its PBO two cycles later
   (3 PBOs). bflist.c times the panel ping with QPC (version 2026-11-19a): 42-58 ms, but TCP connect to the nearest edge (PDX) is
   ~45 ms itself, so the relay adds little; player-to-player = both pings. Lower needs direct connections (hole punching).
+- Specials and shots (Nov 20): special energy = player char +0x490 (float, 100 full), draining while a special is on (special_on:
+  dropped within 1.5 s). During it lock-on/reticle targets pass, shots are not re-aimed (the game aims at the lock), and the camera
+  centres (goal shoulder 0) so the game's target box (placed from its camera) lines up. nospeciallock.txt / nospecialcenter.txt = off.
+  Bullet trail (0x2212E0) reads the weapon's stored direction +0x25C+barrel*12: aim_fix writes the re-aimed direction there too
+  (notracerfix.txt). Freeze guard: D3D push-buffer wait 0x371DFB on device+0x196C released after 0.5 s if the GPU is idle ([unstuck]).
+  Correction: special centring is now opt-in (specialcenter.txt, it shook); the special's shots aim at the locked character
+  (targeting object g_rt +0x5D0, chest = position y + 0.35). Scope (zoom = player +0x7A8 non-zero): cam_build keeps the game's
+  own scope camera and aim_fix leaves the shot to the game (our shoulder camera was 4.4 m behind the gun: shots low-left);
+  ourscope.txt = old behaviour. Shader slots 10-13 are NOT the scope's view-projection.
+- Performance (Nov 21): a busy mission ran ~42 fps with the viewer ~16% busy and the GPU ~25%: the GAME thread was the limit,
+  ~88% "in Windows" (profile.txt profiler, kernel.c; it now also prints Ke waits, sleeps, and the loader function the game thread
+  entered Windows from). Cause: input.c readable() did a VirtualQuery per call, thousands per frame (pose / weapon / aim code) -
+  now cached per 4 KB page for 1 s (uncachedread.txt = old). Also: D3D's write-combine flush 0x372180 (3 trapped register accesses
+  per call) patched to sfence; ret (wcflushtrap.txt = original); switch files in input.c go through fattr_cached (1 s). Remaining
+  traps ~10k/s, all in D3D's interrupt routine 0x3777xx-0x377Cxx on the ticker ([traps] line every 10 s, kernel2.c mmio_fault).
+  Rule: never call Windows per object per frame from hooks - cache it.
+- Specials (Nov 21): skipping camera collision during every special made ALL specials shake (found by A/B against the published
+  build + specialcollide.txt) - collision is skipped only in lock_mode. The Flint lock-on package (target pass-through, steering,
+  smoothing, swipe, shot steering, sprint ban) is OFF by default (flintlock.txt = on) because it leaked into other specials
+  (Tex's Berserker also makes the type-16 targeting object). lock_mode learns per character type (c+0xC) whether a special
+  really locks (+0x5D0 character). The Flint package now = targets pass + shot steering (hit ray) + swipe + sprint ban; the
+  mouse lock-out / steering (locksteer.txt), lock smoothing (locksmooth.txt) and collision-off (specialnocollide.txt) are opt-in.
+- Flint lock, final (Nov 21, user: "feels right"): lock_mode (flintlock.txt, learned per character type) -> input.c lock_target():
+  the nearest valid character (alive: health +0x54 != 0; within 45 m; in front ~70 deg) from the game's candidates (aim_is_character)
+  + its pick (+0x5D0), once the mouse has been still 0.4 s; any mouse movement (> 3 px) releases it. While locked the camera turns
+  to the target (cam_build lock camera, nolockcam.txt), Flint follows it (pend 0.6), shots aim at the body's middle (body_center:
+  mean of the part objects, 0x80 apart, [+0x3F8] = part 56) and the hit ray is steered there (bray_wrap). NEVER write the game's
+  +0x5D0 (froze it). Re-running the hit ray within one shot crashed the game. The cover test (coverunlock.txt) is off; its RING
+  slots are pad[96..107] (pad[64..79] = the camera probe matrix - overwriting it broke collision). oldlock.txt = hard lock + swipes.
+  Test: infinitespecial.txt refills the special energy below 60.
+- Frame cap (Nov 21): after the readable() fix the game ran ~170 frames/s on a 60 Hz screen (choppy, skipping turns). input.c
+  mouse_apply waits for the next vblank (g_vblanks follows the monitor; max 20 ms) - one game frame per refresh as on the Xbox.
+  nofpscap.txt = uncapped. (The earlier "Tex runs 4 updates per frame" was this.)
+- Zoom, final design (Nov 20): OUR camera does the scope (gamescope.txt = the game's scope camera, which popped/slid).
+  Eye eases to the scope eye (g_sc_off: right 0, up 0.444, forward -0.485 from Flint's position); on zoom-in the pitch
+  (g_view_pitch) and the camera's own yaw (g_cam_yaw + g_yaw_off) ease onto the point that was under the hip reticle
+  (reticle_world, depth at 320,190); zoom-out eases back. Flint turns after the camera at 0.35 x the gap per frame (pend,
+  sign g_turn_sgn learnt from hip mouse turns) - a full-gap turn overshot and swung her (jitter). The hit is the hitscan
+  0x230860 -> 0x230040 (bray_wrap): origin ~0.5 m ahead of the eye, direction = Flint's facing, *a5 = range; zoomed shots
+  steer its direction at the crosshair line 100 m out, and the trail (stored dir, drawn from the gun) is pointed at the
+  ray's end point after the call. A moved projectile start (pos) is ignored by the game. Depth under the crosshair is
+  noisy while zoomed (near/far swings): not used for zoomed aim. Sprint is off during a special (it shook the lock view);
+  the lock (lock_char) is held through gaps < 0.5 s and uses a 2.2 s special window.
 - Milestone 101 (hit marker): hitmarker.wav (from the user's clip) plays when the player's shot hits a character. Hook on the
   bullet ray call 0x2309ED (0x230040, stdcall 6 args; result arg4: +0x34 = SHOOTER, +0x44 = object hit; a character when
   [[obj+0xC]+4] == 3; alive when health, a float at character +0x54, is above 0) and on the pass-through path 0x2309CB

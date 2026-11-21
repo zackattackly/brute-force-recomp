@@ -107,8 +107,9 @@ static DWORD __stdcall ticker(void *p) {
 /* sampling profiler (Milestone 77): the ticker thread's eip 1000 times a second, in 32-byte buckets of bfcore.dll;
    every 30 s the busiest buckets go to the log as RVAs (look them up in bfcore.map, base 0x10000000) */
 IMP void *WINAPI GetModuleHandleA(const char *);
-static u32 g_prof[0x30000 / 32], g_prof_other, g_prof_n, g_prof_game, g_tprof[(0x4D4000 - 0x10000) / 64];
-static u32 g_gprof[(0x4D4000 - 0x10000) / 64], g_gprof_core[0x30000 / 32], g_gprof_win;
+static u32 g_prof[0x48000 / 32], g_prof_other, g_prof_n, g_prof_game, g_tprof[(0x4D4000 - 0x10000) / 64];
+static u32 g_gprof[(0x4D4000 - 0x10000) / 64], g_gprof_core[0x48000 / 32], g_gprof_win, g_gwait[(0x4D4000 - 0x10000) / 16], g_lwait[0x48000 / 16];   /* g_lwait: the loader code the game thread was in when inside Windows */   /* g_gwait: the game code that called into Windows / the loader (first game return address on the stack) */
+static void *g_dly_who[8]; static u64 g_dly_ms[8]; static u32 g_dly_n[8];
 static DWORD __stdcall profiler(void *p) {
     u32 base = (u32)GetModuleHandleA("bfcore.dll"), t = 0;
     for (;;) {
@@ -117,21 +118,28 @@ static DWORD __stdcall profiler(void *p) {
         u32 c[0xB4]; memset_(c, 0, sizeof c); c[0] = 0x10001;
         SuspendThread(g_thr[1]); BOOL ok = GetThreadContext(g_thr[1], c); ResumeThread(g_thr[1]);
         if (!ok) continue;
-        u32 e = c[0xB8 / 4] - base; if (e < 0x30000) g_prof[e / 32]++; else { g_prof_other++; u32 ip = c[0xB8 / 4]; if (ip >= 0x10000 && ip < 0x4D4000) { g_prof_game++; g_tprof[(ip - 0x10000) / 64]++; } }
+        u32 e = c[0xB8 / 4] - base; if (e < 0x48000) g_prof[e / 32]++; else { g_prof_other++; u32 ip = c[0xB8 / 4]; if (ip >= 0x10000 && ip < 0x4D4000) { g_prof_game++; g_tprof[(ip - 0x10000) / 64]++; } }
         /* the game's main thread too (Milestone 78): game code in 64-byte buckets, loader code, Windows */
         if (g_nthr >= 3) { u32 c2[0xB4]; memset_(c2, 0, sizeof c2); c2[0] = 0x10001;
             SuspendThread(g_thr[2]); BOOL ok2 = GetThreadContext(g_thr[2], c2); ResumeThread(g_thr[2]);
-            if (ok2) { u32 ip = c2[0xB8 / 4]; if (ip >= 0x10000 && ip < 0x4D4000) g_gprof[(ip - 0x10000) / 64]++; else if (ip - base < 0x30000) g_gprof_core[(ip - base) / 32]++; else g_gprof_win++; } }
+            if (ok2) { u32 ip = c2[0xB8 / 4]; if (ip >= 0x10000 && ip < 0x4D4000) g_gprof[(ip - 0x10000) / 64]++; else { if (ip - base < 0x48000) g_gprof_core[(ip - base) / 32]++; else g_gprof_win++;
+                u32 *sp = (u32 *)c2[0xC4 / 4]; IMP u32 WINAPI VirtualQuery(const void *, void *, u32); u32 mb[7];
+                if (VirtualQuery(sp, mb, sizeof mb) && mb[4] == 0x1000 && !(mb[5] & 0x101)) { u32 end = mb[0] + mb[3]; int lw = 0; for (u32 j = 0; j < 256 && (u32)(sp + j) + 4 <= end; j++) { { u32 v = sp[j]; if (v >= 0x11000 && v < 0x3A0000) { const u8 *q = (const u8 *)v;   /* a return address: a call just before it */
+                        if (q[-5] == 0xE8 || (q[-2] == 0xFF && ((q[-1] >> 3) & 7) == 2) || (q[-3] == 0xFF && ((q[-2] >> 3) & 7) == 2) || (q[-6] == 0xFF && ((q[-5] >> 3) & 7) == 2)) { g_gwait[(v - 0x10000) / 16]++; break; } }
+                      if (v - base >= 0x1000 && v - base < 0x48000) { const u8 *q = (const u8 *)v; if (q[-5] == 0xE8 || (q[-2] == 0xFF && ((q[-1] >> 3) & 7) == 2) || (q[-6] == 0xFF && ((q[-5] >> 3) & 7) == 2)) { if (!lw) { g_lwait[(v - base) / 16]++; lw = 1; } } } } } } } } }
         if (++g_prof_n % 8000 == 0) {
             out("  [profile] ticker samples "); dec(g_prof_n); out(", outside bfcore "); dec(g_prof_other); out(", top (rva:count):");
-            for (u32 k = 0; k < 15; k++) { u32 bi = 0, bv = 0; for (u32 i = 0; i < 0x30000 / 32; i++) if (g_prof[i] > bv) { bv = g_prof[i]; bi = i; } if (!bv) break; out(" "); hex(0x10000000 + bi * 32); out(":"); dec(bv); g_prof[bi] = 0; }
+            for (u32 k = 0; k < 15; k++) { u32 bi = 0, bv = 0; for (u32 i = 0; i < 0x48000 / 32; i++) if (g_prof[i] > bv) { bv = g_prof[i]; bi = i; } if (!bv) break; out(" "); hex(0x10000000 + bi * 32); out(":"); dec(bv); g_prof[bi] = 0; }
             out(", of which game code "); dec(g_prof_game); out(":");
             for (u32 kq = 0; kq < 10; kq++) { u32 bi = 0, bv = 0; for (u32 i = 0; i < (0x4D4000 - 0x10000) / 64; i++) if (g_tprof[i] > bv) { bv = g_tprof[i]; bi = i; } if (!bv) break; out(" "); hex(0x10000 + bi * 64); out(":"); dec(bv); g_tprof[bi] = 0; }
             out("\r\n"); memset_(g_prof, 0, sizeof g_prof); g_prof_other = 0; g_prof_game = 0; memset_(g_tprof, 0, sizeof g_tprof);
             out("  [profile] game main thread: in Windows "); dec(g_gprof_win); out(", top game (addr:count):");
             for (u32 kq = 0; kq < 20; kq++) { u32 bi = 0, bv = 0; for (u32 i = 0; i < (0x4D4000 - 0x10000) / 64; i++) if (g_gprof[i] > bv) { bv = g_gprof[i]; bi = i; } if (!bv) break; out(" "); hex(0x10000 + bi * 64); out(":"); dec(bv); g_gprof[bi] = 0; }
-            out(", top loader (rva:count):");
-            for (u32 kq = 0; kq < 8; kq++) { u32 bi = 0, bv = 0; for (u32 i = 0; i < 0x30000 / 32; i++) if (g_gprof_core[i] > bv) { bv = g_gprof_core[i]; bi = i; } if (!bv) break; out(" "); hex(0x10000000 + bi * 32); out(":"); dec(bv); g_gprof_core[bi] = 0; }
+            out(", waiting called from (game addr:count):"); for (u32 kq = 0; kq < 12; kq++) { u32 bi = 0, bv = 0; for (u32 i = 0; i < (0x4D4000 - 0x10000) / 16; i++) if (g_gwait[i] > bv) { bv = g_gwait[i]; bi = i; } if (!bv) break; out(" "); hex(0x10000 + bi * 16); out(":"); dec(bv); g_gwait[bi] = 0; } memset_(g_gwait, 0, sizeof g_gwait);
+            { void kewait_report(void); out("\r\n"); kewait_report(); out("    sleeps (caller: count, ms asked):"); for (u32 s2 = 0; s2 < 8 && g_dly_who[s2]; s2++) { out(" "); hex((u32)g_dly_who[s2]); out(": "); dec(g_dly_n[s2]); out(", "); dec((u32)g_dly_ms[s2]); g_dly_n[s2] = 0; g_dly_ms[s2] = 0; } out("\r\n"); }
+            out("    game thread in Windows, called from loader (rva:count):"); for (u32 kq = 0; kq < 10; kq++) { u32 bi = 0, bv = 0; for (u32 i = 0; i < 0x48000 / 16; i++) if (g_lwait[i] > bv) { bv = g_lwait[i]; bi = i; } if (!bv) break; out(" "); hex(0x10000000 + bi * 16); out(":"); dec(bv); g_lwait[bi] = 0; } memset_(g_lwait, 0, sizeof g_lwait); out("\r\n");
+            out("  top loader (rva:count):");
+            for (u32 kq = 0; kq < 8; kq++) { u32 bi = 0, bv = 0; for (u32 i = 0; i < 0x48000 / 32; i++) if (g_gprof_core[i] > bv) { bv = g_gprof_core[i]; bi = i; } if (!bv) break; out(" "); hex(0x10000000 + bi * 32); out(":"); dec(bv); g_gprof_core[bi] = 0; }
             out("\r\n"); memset_(g_gprof, 0, sizeof g_gprof); memset_(g_gprof_core, 0, sizeof g_gprof_core); g_gprof_win = 0;
         }
     }
@@ -285,7 +293,9 @@ static s64 NTAPI KeQueryPerformanceCounter(void) { s64 c; QueryPerformanceCounte
 static s64 NTAPI KeQueryPerformanceFrequency(void) { s64 f; QueryPerformanceFrequency(&f); return f; }
 static void NTAPI KeQuerySystemTime(u64 *t) { GetSystemTimeAsFileTime(t); }
 static void NTAPI KeStallExecutionProcessor(u32 us) { s64 f, a, b; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&a); do QueryPerformanceCounter(&b); while ((b - a) * 1000000 / f < us); }
+static void *g_dly_who[8]; static u64 g_dly_ms[8]; static u32 g_dly_n[8];   /* sleeps by caller (profiler) */
 static s32 NTAPI KeDelayExecutionThread(u8 mode, u8 alertable, s64 *interval) {
+    { void *w = __builtin_return_address(0); u32 s2 = 0; for (; s2 < 8; s2++) if (g_dly_who[s2] == w || !g_dly_who[s2]) break; if (s2 < 8) { g_dly_who[s2] = w; g_dly_n[s2]++; s64 v0 = *interval; g_dly_ms[s2] += v0 < 0 ? (u64)(-v0) / 10000 : 0; } }
     /* A zero delay is a yield (SleepEx(0)): the game's synchronous reads spin on it while its I/O thread completes them,
        so turning it into Sleep(1) made every read cost a timer tick (Milestone 76). */
     s64 v = *interval; u32 ms;

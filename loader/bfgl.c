@@ -1959,6 +1959,19 @@ static void do_flip(u32 addr) {
             glBindFramebuffer(0x8CA8, f->fbo); glBindBuffer(0x88EB, pbo[pi]); glReadPixels(rx * f->w / 640 * f->gs + f->gs / 2, ry * f->h / 480 * f->gs + f->gs / 2, 1, 1, 0x1902 /* DEPTH_COMPONENT */, 0x1406, 0);   /* GPU pixel (Milestone 96) */
             if (primed) { f32 dv = 1; glBindBuffer(0x88EB, pbo[pi ^ 1]); glGetBufferSubData(0x88EB, 0, 4, &dv); g_r->pad[50] = *(u32 *)&dv; g_r->pad[51]++; }
             glBindBuffer(0x88EB, 0); pi ^= 1; primed = 1; } }
+    {   /* the lock's cover test (Nov 21): a 3 x 3 grid of depth samples around a point the loader asks for - pad[96] = centre x << 16 | y,
+           pad[97] = spacing x << 16 | y (640x480) - read one frame late into pad[98..106] (float bits), pad[107] counts updates */
+        static GLuint pb9[2]; static u32 pi9, pr9;
+        u32 rq = g_r->pad[96];
+        if (rq && f->w >= 320) {
+            if (!pb9[0]) { glGenBuffers(2, pb9); for (int k = 0; k < 2; k++) { glBindBuffer(0x88EB, pb9[k]); glBufferData(0x88EB, 36, 0, 0x88E1); } glBindBuffer(0x88EB, 0); }
+            s32 cx = (s32)(rq >> 16), cy = (s32)(rq & 0xFFFF), sx = (s32)(g_r->pad[97] >> 16), sy = (s32)(g_r->pad[97] & 0xFFFF);
+            glBindFramebuffer(0x8CA8, f->fbo); glBindBuffer(0x88EB, pb9[pi9]);
+            for (int i = 0; i < 9; i++) { s32 px = cx + (i % 3 - 1) * sx, py = cy + (i / 3 - 1) * sy; if (px < 0) px = 0; if (px > 639) px = 639; if (py < 0) py = 0; if (py > 479) py = 479;
+                glReadPixels(px * f->w / 640 * f->gs + f->gs / 2, py * f->h / 480 * f->gs + f->gs / 2, 1, 1, 0x1902, 0x1406, (void *)(u32)(i * 4)); }
+            if (pr9) { f32 dv[9]; glBindBuffer(0x88EB, pb9[pi9 ^ 1]); glGetBufferSubData(0x88EB, 0, 36, dv); for (int i = 0; i < 9; i++) g_r->pad[98 + i] = *(u32 *)&dv[i]; g_r->pad[107]++; }
+            glBindBuffer(0x88EB, 0); pi9 ^= 1; pr9 = 1; }
+        else pr9 = 0; }
     PM(21)
     {   /* brightness probe (lumaprobe.txt, Milestone 88): mean brightness of each presented frame (8x8 samples of the
            surface), 800 frames from 40 s, to luma_log.txt; flicker shows as jumps between consecutive frames */
