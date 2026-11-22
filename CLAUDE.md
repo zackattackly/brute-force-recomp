@@ -199,7 +199,7 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   mean of the part objects, 0x80 apart, [+0x3F8] = part 56) and the hit ray is steered there (bray_wrap). NEVER write the game's
   +0x5D0 (froze it). Re-running the hit ray within one shot crashed the game. The cover test (coverunlock.txt) is off; its RING
   slots are pad[96..107] (pad[64..79] = the camera probe matrix - overwriting it broke collision). oldlock.txt = hard lock + swipes.
-  Test: infinitespecial.txt refills the special energy below 60.
+
 - Frame cap (Nov 21): after the readable() fix the game ran ~170 frames/s on a 60 Hz screen (choppy, skipping turns). input.c
   mouse_apply waits for the next vblank (g_vblanks follows the monitor; max 20 ms) - one game frame per refresh as on the Xbox.
   nofpscap.txt = uncapped. (The earlier "Tex runs 4 updates per frame" was this.)

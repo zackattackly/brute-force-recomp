@@ -497,7 +497,6 @@ void mouse_apply(u8 *c) {
         if (fattr_cached("nofpscap.txt") == 0xFFFFFFFF) { u32 t0 = GetTickCount(); while (*(volatile u32 *)&g_vblanks == lastvb && GetTickCount() - t0 < 20) Sleep(0); }
         lastvb = *(volatile u32 *)&g_vblanks; }
     g_input_tid = GetCurrentThreadId(); (void)scoped();   /* every frame: the viewer samples depth under the right crosshair */
-    if (readable(c + 0x490, 4) && *(float *)(c + 0x490) < 60.0f && fattr_cached("infinitespecial.txt") != 0xFFFFFFFF) *(float *)(c + 0x490) = 100.0f;   /* test: the special's energy refilled below 60 (it still drains: special_on sees the drop) */
     g_ctl_tick = GetTickCount(); (void)pose_update;   /* Milestone 93: the RUN/DASH switch is off (DASH is already the run of these characters; switching fought the game's own requests and froze the animation) */
     int view_mouse(s32 *, s32 *); s32 mx, my; view_mouse(&mx, &my); mx += g_fake_dx; my += g_fake_dy;
     static s32 lx, ly, init; static s64 lt, qf; s64 now; if (!qf) QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&now);
