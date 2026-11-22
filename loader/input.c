@@ -830,10 +830,13 @@ static void cam_build(u8 *cam) {
                 s64 lnw; if (!lqf) QueryPerformanceFrequency(&lqf); QueryPerformanceCounter(&lnw); float ldt = llt ? (float)(lnw - llt) / (float)lqf : 0.0f; llt = lnw; if (ldt > 0.1f) ldt = 0.1f;
                 u8 *lock_target(void); u8 *tq = lock_target();
                 if (tq && char_is(tq) && !scoped() && fattr_cached("nolockcam.txt") == 0xFFFFFFFF) { float *x = char_xf(tq);
-                    float v[3] = {x[9] - pos[0], x[10] + 0.35f - (pos[1] + 1.0f), x[11] - pos[2]}, h = sqrt_(v[0] * v[0] + v[2] * v[2]);
+                    /* both positions smoothed (~0.12 s): the walk animations' bob made the camera shake when either moved */
+                    static float tf[3], pf[3]; static u8 *tfq; float kf = ldt * 8.0f; if (kf > 1.0f) kf = 1.0f; if (tfq != tq || !lon) { tfq = tq; for (int q = 0; q < 3; q++) { tf[q] = x[9 + q]; pf[q] = pos[q]; } }
+                    for (int q = 0; q < 3; q++) { tf[q] += (x[9 + q] - tf[q]) * kf; pf[q] += (pos[q] - pf[q]) * kf; }
+                    float v[3] = {tf[0] - pf[0], tf[1] + 0.35f - (pf[1] + 1.0f), tf[2] - pf[2]}, h = sqrt_(v[0] * v[0] + v[2] * v[2]);
                     if (h > 1.0f) { float yt = atan2_ext(v[0], v[2]), pt = atan2_ext(v[1], h);
                         if (!lon) { lon = 1; float hb = sqrt_(g_cb[0] * g_cb[0] + g_cb[2] * g_cb[2]); lsy = atan2_ext(-g_cb[0], -g_cb[2]); lsp = atan2_ext(-g_cb[1], hb); }
-                        float k = ldt * 20.0f; if (k > 1.0f) k = 1.0f; float d = yt - lsy;   /* stronger (user) */ while (d > 3.14159f) d -= 6.28318f; while (d < -3.14159f) d += 6.28318f; lsy += d * k; lsp += (pt - lsp) * k;
+                        float k = ldt * 14.0f; if (k > 1.0f) k = 1.0f; float d = yt - lsy;   /* stronger (user) */ while (d > 3.14159f) d -= 6.28318f; while (d < -3.14159f) d += 6.28318f; lsy += d * k; lsp += (pt - lsp) * k;
                         float s1, c1; __asm__("fsin" : "=t"(s1) : "0"(lsy)); __asm__("fcos" : "=t"(c1) : "0"(lsy)); fx = s1; fz = c1; pv = lsp;
                         g_lockcam_yaw = lsy; g_lockcam_pitch = lsp; g_lockcam_on = 1; } }
                 else { lon = 0; g_lockcam_on = 0; } }
