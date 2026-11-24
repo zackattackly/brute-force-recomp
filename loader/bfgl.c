@@ -77,6 +77,11 @@ GL_FN(void, glRenderbufferStorage, (GLenum, GLenum, GLsizei, GLsizei)) GL_FN(GLe
 GL_FN(GLuint, glCreateShader, (GLenum)) GL_FN(void, glShaderSource, (GLuint, GLsizei, const GLchar **, const GLint *)) GL_FN(void, glCompileShader, (GLuint))
 GL_FN(void, glGetShaderiv, (GLuint, GLenum, GLint *)) GL_FN(void, glGetShaderInfoLog, (GLuint, GLsizei, GLsizei *, GLchar *)) GL_FN(GLuint, glCreateProgram, (void))
 GL_FN(void, glAttachShader, (GLuint, GLuint)) GL_FN(void, glLinkProgram, (GLuint)) GL_FN(void, glGetProgramiv, (GLuint, GLenum, GLint *)) GL_FN(void, glGetProgramInfoLog, (GLuint, GLsizei, GLsizei *, GLchar *))
+GL_FN(void, glBufferSubData_, (GLenum, GLintptr, GLsizeiptr, const void *))   /* optional (Nov 23): loaded with glp, may be 0 */
+typedef void *GLsync_;   /* fences (Nov 23, probe readback): optional, loaded with glp */
+GL_FN(GLsync_, glFenceSync_, (GLenum, u32)) GL_FN(GLenum, glClientWaitSync_, (GLsync_, u32, unsigned long long)) GL_FN(void, glDeleteSync_, (GLsync_))
+GL_FN(void, glBufferStorage_, (GLenum, GLsizeiptr, const void *, u32)) GL_FN(void *, glMapBufferRange_, (GLenum, GLintptr, GLsizeiptr, u32)) GL_FN(void, glBindBufferRange_, (GLenum, GLuint, GLuint, GLintptr, GLsizeiptr))
+GL_FN(GLuint, glGetUniformBlockIndex_, (GLuint, const GLchar *)) GL_FN(void, glUniformBlockBinding_, (GLuint, GLuint, GLuint)) GL_FN(void, glBindBufferBase_, (GLenum, GLuint, GLuint))
 GL_FN(void, glUseProgram, (GLuint)) GL_FN(GLint, glGetUniformLocation, (GLuint, const GLchar *)) GL_FN(void, glUniform1i, (GLint, GLint)) GL_FN(void, glUniform4fv, (GLint, GLsizei, const GLfloat *))
 GL_FN(void, glUniform4iv, (GLint, GLsizei, const GLint *)) GL_FN(void, glUniform2iv, (GLint, GLsizei, const GLint *)) GL_FN(void, glUniform4f, (GLint, f32, f32, f32, f32)) GL_FN(void, glUniform2f, (GLint, f32, f32))
 GL_FN(void, glDeleteProgram, (GLuint)) GL_FN(void, glVertexAttribPointer, (GLuint, GLint, GLenum, GLboolean, GLsizei, const void *)) GL_FN(void, glEnableVertexAttribArray, (GLuint)) GL_FN(void, glBindAttribLocation, (GLuint, GLuint, const GLchar *))
@@ -535,7 +540,7 @@ static const char *g_fs =
 "  if (u_atest.x >= 0) { int a8 = int(ga * 255.0 + 0.5), r = u_atest.y; int f = u_atest.x; bool ok = f == 7 || (f == 1 && a8 < r) || (f == 2 && a8 == r) || (f == 3 && a8 <= r) || (f == 4 && a8 > r) || (f == 5 && a8 != r) || (f == 6 && a8 >= r); if (!ok) discard; }\n"
 "  o_col = vec4(rgb, ga);\n"
 "}\n";
-static GLuint g_prog, g_vbo, g_vao;
+static GLuint g_prog, g_vbo, g_vao; static GLuint g_ubo; static u32 g_vsh_built;   /* g_vsh_built: vertex programs linked (hitch log) */   /* g_ubo: the constants block (Nov 23), see g_vc */
 static GLint u_vp, u_tmode, u_tscale, u_nst, u_muxmsb, u_crg, u_crep, u_cmap, u_arg, u_aal, u_amap, u_cdst, u_adst, u_op, u_f0, u_f1, u_fog, u_fa, u_fb, u_frep, u_finv, u_atest, u_c, u_fogp, u_fogon, u_shadow, u_zscale, u_sbias, u_hud, u_pr, u_pon;
 /* one linked program: its uniform locations (copied into the globals above when it is used) */
 typedef struct { u32 key, used, cgen, ustate; GLuint id; GLint loc[31]; f32 hud[2]; f32 vp[4]; u32 ptouch; GLuint vs; } PROG;   /* ustate: hash of the state its uniforms were set for */   /* cgen: the constants generation it last got */   /* hud: the u_hud it holds */
@@ -547,6 +552,7 @@ static f32 g_hud_k = 1.0f;
 static void prog_locs(PROG *p) { u32 i = 0;
     #define GETL(n) p->loc[i++] = glGetUniformLocation(p->id, #n);
     ULIST(GETL)
+    if (g_ubo) { GLuint bi = glGetUniformBlockIndex_(p->id, "CB"); if (bi != 0xFFFFFFFFu) glUniformBlockBinding_(p->id, bi, 0); }   /* constants block (Nov 23) */
     glUseProgram(p->id); { static const char *cn[4] = {"c0", "c1", "c2", "c3"}, *dn[4] = {"d0", "d1", "d2", "d3"}; for (int k = 0; k < 4; k++) { glUniform1i(glGetUniformLocation(p->id, cn[k]), 4 + k); glUniform1i(glGetUniformLocation(p->id, dn[k]), 8 + k); } } glUniform1i(glGetUniformLocation(p->id, "s0"), 0); glUniform1i(glGetUniformLocation(p->id, "s1"), 1); glUniform1i(glGetUniformLocation(p->id, "s2"), 2); glUniform1i(glGetUniformLocation(p->id, "s3"), 3); }
 static PROG *g_curp;
 static void prog_use(PROG *p) { if (g_curp == p) return; g_curp = p; u32 i = 0;
@@ -948,6 +954,25 @@ static int apply_state(PROG *P) {
 
 /* ---- vertex programs on the GPU (Milestone 81): NV2A microcode -> GLSL ---- */
 static u32 g_vprog[136][4], g_vstart, g_vdirty = 1, g_vcgen = 1; static f32 g_vc[192][4];   /* g_vcgen: bumped when constants change */
+/* constants block (Nov 23): every vertex program re-uploaded all 192 constants (3 KB) whenever any changed - ~80,000 times a second in a
+   busy mission. Now all programs read one uniform buffer (binding 0) and only the changed slots are written to it before a draw.
+   Opt-in: g_ubo is set only if constbuffer.txt exists at start (it caused stalls, see the init) and the driver accepts the block. */
+/* Nov 23, second design (constring): the uniform buffer is a 32 MB ring, persistently mapped (glBufferStorage). Each time the constants
+   changed, the full 3 KB set is copied to a FRESH place in the ring and bound there with glBindBufferRange - nothing the GPU may still read
+   is ever overwritten (the first design's glBufferSubData into one buffer made the driver stall), and the driver copies nothing. The ring
+   is 4 segments of 8 MB, each closed with a fence; a segment is reused only after its fence passed (normally long ago).
+   OPT-IN: constring.txt (at start; needs GL 4.4 buffer storage). Drew correctly, no measurable gain in busy scenes. */
+#define CR_SEG (8u << 20)
+#define CR_NSEG 4
+static u8 *g_cr_map; static u32 g_cr_off, g_cr_seg, g_cbgen; static void *g_cr_fence[CR_NSEG];
+static u32 cr_put(const void *src) {   /* copies 3 KB of constants into the ring, binds them, returns the offset */
+    u32 o = (g_cr_off + 255) & ~255u;
+    if (o + 3072 > (g_cr_seg + 1) * CR_SEG) {   /* segment full: fence it, move to the next (waiting for its old fence if needed) */
+        g_cr_fence[g_cr_seg] = glFenceSync_(0x9117, 0); g_cr_seg = (g_cr_seg + 1) % CR_NSEG; o = g_cr_seg * CR_SEG;
+        if (g_cr_fence[g_cr_seg]) { glClientWaitSync_(g_cr_fence[g_cr_seg], 1 /* FLUSH */, 1000000000ull); glDeleteSync_(g_cr_fence[g_cr_seg]); g_cr_fence[g_cr_seg] = 0; } }
+    cpy(g_cr_map + o, src, 3072); glBindBufferRange_(0x8A11, 0, g_ubo, o, 3072); g_cr_off = o + 3072; return o; }
+static u32 g_cd_lo = 0, g_cd_hi = 192;   /* changed slots not yet in the buffer */
+static void ubo_sync(void) { if (g_cr_map) { if (g_cbgen != g_vcgen) { cr_put(g_vc); g_cbgen = g_vcgen; } return; } if (g_cd_hi > g_cd_lo) { glBindBuffer(0x8A11, g_ubo); glBufferSubData_(0x8A11, g_cd_lo * 16, (g_cd_hi - g_cd_lo) * 16, &g_vc[g_cd_lo][0]); g_cd_lo = 192; g_cd_hi = 0; } }
 static GLuint g_fsobj, g_vao2, g_vbo2, g_ibo;
 static char g_src[65536]; static u32 g_srcn;
 static void ap(const char *s) { while (*s && g_srcn < sizeof g_src - 1) g_src[g_srcn++] = *s++; g_src[g_srcn] = 0; }
@@ -969,7 +994,8 @@ static void src_op(const u32 *w, int p) {
 static void wr(const char *dst, u32 mask, const char *val) { if (!mask) return; ap(dst); ap(g_mask[mask]); ap(" = "); ap(val); ap(g_mask[mask]); ap(";\n"); }
 static int gen_vsh(void) {
     g_srcn = 0;
-    ap("#version 130\nin vec4 v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12,v13,v14,v15;\nuniform vec4 u_c[192]; uniform vec4 u_vp; uniform vec2 u_hud; uniform vec4 u_pr[4]; uniform vec4 u_pon;\nout vec4 v_d0, v_d1, v_t0, v_t1, v_t2, v_t3; out float v_fogc;\n");
+    ap(g_ubo ? "#version 130\n#extension GL_ARB_uniform_buffer_object : require\nlayout(std140) uniform CB { vec4 u_c[192]; };\n" : "#version 130\nuniform vec4 u_c[192];\n");   /* constants block (Nov 23) */
+    ap("in vec4 v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12,v13,v14,v15;\nuniform vec4 u_vp; uniform vec2 u_hud; uniform vec4 u_pr[4]; uniform vec4 u_pon;\nout vec4 v_d0, v_d1, v_t0, v_t1, v_t2, v_t3; out float v_fogc;\n");
     ap("void main() {\nvec4 r0=vec4(0.0),r1=r0,r2=r0,r3=r0,r4=r0,r5=r0,r6=r0,r7=r0,r8=r0,r9=r0,r10=r0,r11=r0,r12=r0,r13=r0,r14=r0,r15=r0;\n");
     ap("vec4 o0=vec4(0,0,0,1),o1=o0,o2=o0,o3=o0,o4=o0,o5=o0,o6=o0,o7=o0,o8=o0,o9=o0,o10=o0,o11=o0,o12=o0,o13=o0,o14=o0,o15=o0; int a0=0; vec4 A,B,C,m,l; float s;\n");
     static const u8 macneed[16] = {0, 1, 3, 5, 7, 3, 3, 3, 3, 3, 3, 3, 3, 1, 0, 0};
@@ -1030,7 +1056,7 @@ static PROG *vsh_program(void) {
     GLuint id = glCreateProgram(); glAttachShader(id, vs); glAttachShader(id, g_fsobj);
     for (u32 i = 0; i < 16; i++) { char nm[4] = {'v', 0, 0, 0}; if (i >= 10) { nm[1] = '1'; nm[2] = '0' + i - 10; } else nm[1] = '0' + i; glBindAttribLocation(id, i, nm); }
     glBindFragDataLocation(id, 0, "o_col"); glLinkProgram(id);
-    GLint ok = 0; glGetProgramiv(id, 0x8B82, &ok); if (!ok) { info(" vsh link failed"); return 0; }
+    GLint ok = 0; glGetProgramiv(id, 0x8B82, &ok); g_vsh_built++; if (!ok) { info(" vsh link failed"); return 0; }
     p->id = id; p->key = h; p->used = g_frame; p->vs = vs; prog_locs(p); g_curp = 0;
     return p;
 }
@@ -1079,7 +1105,20 @@ static u32 vhash_old(u32 lo, u32 hi) {   /* Milestone 87: the whole range (a 128
     for (; i < n; i++) a = (a ^ p[i]) * 16777619u;
     return a ^ (b * 3) ^ (c * 5) ^ (d * 7) ^ n;
 }
-GL_FN(void, glBufferSubData_, (GLenum, GLintptr, GLsizeiptr, const void *))
+/* streaming rings (Nov 23): busy missions send ~1,500 indexed draws a frame; a glBufferData per draw for the indices (and per
+   immediate draw for its vertices) made the driver hand out fresh storage each time, ~4 us a draw, and the viewer hit 100% busy
+   (~43 fps). Now each kind writes into one 8 MB buffer at a moving offset and the buffer is only renewed (orphaned) when full.
+   oldupload.txt (read every second) = the old per-draw glBufferData. */
+#define SRING_SZ (8u << 20)
+typedef struct { GLuint buf; u32 off; } SRING;
+static SRING g_sr_idx, g_sr_imm;
+static int sring_on(void) { static u32 tl, old; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; old = GetFileAttributesA("oldupload.txt") != 0xFFFFFFFF; } return !old && glBufferSubData_; }
+static u32 sring_put(SRING *r, GLenum target, u32 size, const void *data) {   /* the buffer is left bound to target; returns the offset */
+    if (!r->buf) { glGenBuffers(1, &r->buf); glBindBuffer(target, r->buf); glBufferData(target, SRING_SZ, 0, 0x88E0); r->off = 0; }
+    else glBindBuffer(target, r->buf);
+    u32 o = (r->off + 63) & ~63u;
+    if (o + size > SRING_SZ) { glBufferData(target, SRING_SZ, 0, 0x88E0); o = 0; }   /* full: fresh storage; the GPU keeps reading the old */
+    glBufferSubData_(target, o, size, data); r->off = o + size; return o; }
 static GLuint vbuf_get(u32 lo, u32 hi) {
     VCACHE *e = 0, *old = &g_vcache[0];
     for (u32 i = 0; i < NVC; i++) { VCACHE *c = &g_vcache[i]; if (c->buf && c->lo == lo && c->hi == hi) { e = c; break; } if (!c->buf) { if (!old->buf || 1) { old = c; break; } } if (c->used < old->used) old = c; }
@@ -1118,7 +1157,8 @@ static int vsh_setup(PROG **pp) {
     PROG *p = vsh_program(); if (!p) return 0;
     dbg_poll(); if (!g_state_ok || g_state_prog != p) { if (!apply_state(p)) return 0; g_state_ok = 1; g_state_prog = p; } dbg_apply();
     if (g_state_q) { p = g_state_q; if (g_curp != p) prog_use(p); }   /* the specialised program apply_state chose */
-    if (p->cgen != g_vcgen) { glUniform4fv(u_c, 192, &g_vc[0][0]); p->cgen = g_vcgen; }   /* only when they changed (Milestone 81) */
+    if (g_ubo) ubo_sync();   /* constants block (Nov 23): only the changed slots, shared by every program */
+    else if (p->cgen != g_vcgen) { glUniform4fv(u_c, 192, &g_vc[0][0]); p->cgen = g_vcgen; }   /* only when they changed (Milestone 81) */
     *pp = p; return 1;
 }
 static int g_zon, g_zrun;
@@ -1264,7 +1304,11 @@ static void probe_attrs(const u32 *lo, const u32 *glo, const u32 *grp, const GLu
         } } }
 static void probe_draw(int indexed, u32 mode, u32 n, const f32 *imm) {
     if (!g_pon || !g_pfbo || !g_cur_fb || g_cur_fb->w != 640 || g_cur_fb->h != 480 || !K(0x30C) || !K(0x35C) || K(0x304) || u_pr < 0 || !g_curp) return;
-    if (g_pN > 1 && ((K(0x1720) & 0x03FFFFFF) * 2654435761u >> 20) % g_pN != g_pphase) return;
+    if (g_pN > 1) {   /* group of this object: Nov 23 - by its own vertex range (cached buffer) and index count, not the vertex address alone
+                         (most of the world shares one vertex buffer, so nearly everything fell into one group and groups saved nothing) */
+        u32 key = indexed ? (u32)g_va[0].buf * 0x9E3779B1u ^ n * 0x85EBCA77u ^ g_va[0].off : (K(0x1720) & 0x03FFFFFF) ^ n * 0x85EBCA77u;
+        key ^= key >> 15; key *= 0x2C1B3C6Du; key ^= key >> 12;
+        if (key % g_pN != g_pphase) return; }
     if (!g_prec) { HANDLE hp = GetProcessHeap(); g_prec = HeapAlloc(hp, 0, PREC_N * sizeof(PREC)); g_pidx = HeapAlloc(hp, 0, PIDX_N * 4); g_pvtx = HeapAlloc(hp, 0, PVTX_N); g_pcon = HeapAlloc(hp, 0, PCON_N * sizeof *g_pcon);
         if (!g_prec || !g_pidx || !g_pvtx || !g_pcon) { g_prec = 0; return; } }
     if (g_nprec >= PREC_N) return;
@@ -1275,7 +1319,12 @@ static void probe_draw(int indexed, u32 mode, u32 n, const f32 *imm) {
     if (indexed) { r->imm = 0; r->ioff = g_npidx; cpy(g_pidx + g_npidx, g_idxb, n * 4); g_npidx += n; cpy(r->a, g_va, sizeof g_va); }
     else { r->imm = 1; r->voff = g_npvtx; cpy(g_pvtx + g_npvtx, imm, n * 256); g_npvtx += n * 256; } }
 static void zq_stop(void); static void zq_start(void);
-static void probe_replay(void) {   /* at the flip: every recorded draw into the probe, one render-target switch */
+static long long g_pk_t; static u32 g_pk_n;   /* replay time and replays this second (automatic groups, probe_flip) */
+static void probe_replay_(void);
+static u32 g_bj_n, g_bj_clean, g_bj_addr, g_bj_reg[0x800];   /* batching survey (gl_pump); g_bj_reg: changes per register */
+static u32 g_pk_recs, g_pk_frames; static long long g_pk_t5, g_pk_rp;   /* g_pk_rp: time in the probe's glReadPixels */   /* for the profile line (5 s): records replayed, replays, replay time */
+static void probe_replay(void) { long long a, b; g_pk_recs += g_nprec; g_pk_frames++; QueryPerformanceCounter(&a); probe_replay_(); QueryPerformanceCounter(&b); g_pk_t += b - a; g_pk_t5 += b - a; g_pk_n++; }
+static void probe_replay_(void) {   /* at the flip: every recorded draw into the probe, one render-target switch */
     if (!g_nprec) return;
     int zr = g_zrun; if (zr) zq_stop();   /* not counted in the game's pixel counts (they decide what the game draws) */
     if (!g_pibo) { glGenBuffers(1, &g_pibo); glGenBuffers(1, &g_pvbo); }
@@ -1285,25 +1334,62 @@ static void probe_replay(void) {   /* at the flip: every recorded draw into the 
     if (g_npidx) { glBindBuffer(0x8893, g_pibo); glBufferData(0x8893, g_npidx * 4, g_pidx, 0x88E0); }
     if (g_npvtx) { glBindBuffer(0x8892, g_pvbo); glBufferData(0x8892, g_npvtx, g_pvtx, 0x88E0); }
     PROG *lastp = 0; u32 lastc = 0xFFFFFFFF; static PROG *touched[2048]; u32 ntouch = 0;
+    /* Performance (Nov 23): the replay set all 16 attributes (~35 GL calls) for every recorded draw, ~255 ms a second in a busy
+       mission. Now only what differs from the previous draw is set; immediate draws share one layout and start at their vertex
+       (voff is a multiple of 256 = one vertex). oldprobereplay.txt (read every second) = the old way. */
+    static u32 tlo, oldr; { u32 now = GetTickCount(); if (now - tlo > 1000) { tlo = now; oldr = GetFileAttributesA("oldprobereplay.txt") != 0xFFFFFFFF; } }
+    PVA cur[16]; u8 st[16]; for (u32 i = 0; i < 16; i++) st[i] = 0;   /* st: 0 unknown, 1 array (cur), 2 constant (cur.c), 3 immediate layout */
+    GLuint abuf = 0xFFFFFFFF;
+    if (g_npidx) glBindBuffer(0x8893, g_pibo);   /* element buffer = VAO state: bound once */
     for (u32 k = 0; k < g_nprec; k++) {
         PREC *r = &g_prec[k]; if (!r->p->id || r->p->key != r->key) continue;   /* the program was replaced since */
         if (r->p != lastp) { g_curp = 0; prog_use(r->p); lastp = r->p; lastc = 0xFFFFFFFF; if (!r->p->ptouch && ntouch < 2048) touched[ntouch++] = r->p; r->p->ptouch = 1;
             glUniform4fv(u_pr, 4, g_pm); glUniform4f(u_pon, 1, 0, 0, 0); }
         glUniform4fv(u_vp, 1, r->vp);
-        if (r->cidx != lastc) { glUniform4fv(u_c, 192, &g_pcon[r->cidx][0][0]); lastc = r->cidx; }
-        if (r->imm) { glBindBuffer(0x8892, g_pvbo); for (u32 i = 0; i < 16; i++) { glEnableVertexAttribArray(i); glVertexAttribPointer(i, 4, 0x1406, 0, 256, (void *)(r->voff + i * 16)); }
-            glDrawArrays(r->mode - 1, 0, r->n); }
-        else { for (u32 i = 0; i < 16; i++) { PVA *a = &r->a[i];
-                if (a->on) { glBindBuffer(0x8892, a->buf); glEnableVertexAttribArray(i); glVertexAttribPointer(i, a->size, a->type, a->norm, a->stride, (void *)a->off); }
-                else { glDisableVertexAttribArray(i); glVertexAttrib4fv(i, a->c); } }
-            glBindBuffer(0x8893, g_pibo); glDrawElements(r->mode - 1, r->n, 0x1405, (void *)(r->ioff * 4)); } }
+        if (r->cidx != lastc) { if (g_cr_map) { cr_put(&g_pcon[r->cidx][0][0]); g_cbgen = 0; }   /* ring: the next game draw binds the live set again */
+            else if (g_ubo) { glBindBuffer(0x8A11, g_ubo); glBufferSubData_(0x8A11, 0, 192 * 16, &g_pcon[r->cidx][0][0]); g_cd_lo = 0; g_cd_hi = 192; }   /* the live constants go back before the next game draw */
+            else glUniform4fv(u_c, 192, &g_pcon[r->cidx][0][0]); lastc = r->cidx; }
+        if (oldr) {
+            if (r->imm) { glBindBuffer(0x8892, g_pvbo); for (u32 i = 0; i < 16; i++) { glEnableVertexAttribArray(i); glVertexAttribPointer(i, 4, 0x1406, 0, 256, (void *)(r->voff + i * 16)); }
+                glDrawArrays(r->mode - 1, 0, r->n); }
+            else { for (u32 i = 0; i < 16; i++) { PVA *a = &r->a[i];
+                    if (a->on) { glBindBuffer(0x8892, a->buf); glEnableVertexAttribArray(i); glVertexAttribPointer(i, a->size, a->type, a->norm, a->stride, (void *)a->off); }
+                    else { glDisableVertexAttribArray(i); glVertexAttrib4fv(i, a->c); } }
+                glBindBuffer(0x8893, g_pibo); glDrawElements(r->mode - 1, r->n, 0x1405, (void *)(r->ioff * 4)); }
+            for (u32 i = 0; i < 16; i++) st[i] = 0; abuf = 0xFFFFFFFF; continue; }
+        if (r->imm) {
+            for (u32 i = 0; i < 16; i++) if (st[i] != 3) { if (abuf != g_pvbo) { glBindBuffer(0x8892, g_pvbo); abuf = g_pvbo; }
+                if (st[i] != 1) glEnableVertexAttribArray(i); glVertexAttribPointer(i, 4, 0x1406, 0, 256, (void *)(i * 16)); st[i] = 3; }
+            glDrawArrays(r->mode - 1, (GLint)(r->voff / 256), r->n); }
+        else {
+            for (u32 i = 0; i < 16; i++) { PVA *a = &r->a[i], *c = &cur[i];
+                if (a->on) {
+                    if (st[i] == 1 && c->buf == a->buf && c->off == a->off && c->stride == a->stride && c->size == a->size && c->type == a->type && c->norm == a->norm) continue;
+                    if (abuf != a->buf) { glBindBuffer(0x8892, a->buf); abuf = a->buf; }
+                    if (st[i] != 1 && st[i] != 3) glEnableVertexAttribArray(i);
+                    glVertexAttribPointer(i, a->size, a->type, a->norm, a->stride, (void *)a->off); *c = *a; st[i] = 1; }
+                else {
+                    const u32 *x = (const u32 *)a->c, *y = (const u32 *)c->c;
+                    if (st[i] == 2 && x[0] == y[0] && x[1] == y[1] && x[2] == y[2] && x[3] == y[3]) continue;
+                    if (st[i] != 2) glDisableVertexAttribArray(i);
+                    glVertexAttrib4fv(i, a->c); c->c[0] = a->c[0]; c->c[1] = a->c[1]; c->c[2] = a->c[2]; c->c[3] = a->c[3]; st[i] = 2; } }
+            glDrawElements(r->mode - 1, r->n, 0x1405, (void *)(r->ioff * 4)); } }
     for (u32 i = 0; i < ntouch; i++) { PROG *q = touched[i]; q->ptouch = 0; g_curp = 0; prog_use(q); glUniform4f(u_pon, 0, 0, 0, 0); q->ustate = 0; q->cgen = 0; }
     g_curp = 0; glBindVertexArray(g_vao); glColorMask(1, 1, 1, 1);
     g_nprec = 0; g_npidx = 0; g_npvtx = 0; g_npcon = 0; g_pdrawn = 1;
     g_state_ok = 0; state_cache_reset(); if (zr) zq_start(); }
 static void probe_flip(void) {
     {   static u32 tl, off; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; off = GetFileAttributesA("nocamcollide.txt") != 0xFFFFFFFF;
-            u32 v = 1; HANDLE fh = CreateFileA("probeevery.txt", 0x80000000, 1, 0, 3, 0x80, 0); if (fh != (HANDLE)-1) { char b[8] = {0}; DWORD nr = 0; ReadFile(fh, b, 7, &nr, 0); CloseHandle(fh); u32 x = 0; int any = 0; for (DWORD k = 0; k < nr; k++) if (b[k] >= 0x30 && b[k] <= 0x39) { x = x * 10 + b[k] - 0x30; any = 1; } if (any && x >= 1 && x <= 8) v = x; }
+            /* Nov 23: automatic groups by cost - the replay took ~480 ms a second with 2,000-3,800 draws a frame (Return to Osiris).
+               Average replay over the last second above 2.5 ms a frame -> one more group (up to 4); below 0.8 ms (as if with one group
+               fewer: x N / (N-1)) -> one fewer. Collision then updates every N frames in busy scenes only. probeevery.txt (a number)
+               overrides; probefull.txt = always 1 group. */
+            static long long pqf; if (!pqf) QueryPerformanceFrequency(&pqf);
+            u32 v = g_pN; if (g_pk_n) { f32 ms = (f32)g_pk_t * 1000.0f / (f32)pqf / (f32)g_pk_n;
+                if (ms > 2.5f && v < 4) v++; else if (v > 1 && ms * (f32)v / (f32)(v - 1) < 0.8f) v--; }
+            g_pk_t = 0; g_pk_n = 0;
+            if (GetFileAttributesA("probefull.txt") != 0xFFFFFFFF) v = 1;
+            HANDLE fh = CreateFileA("probeevery.txt", 0x80000000, 1, 0, 3, 0x80, 0); if (fh != (HANDLE)-1) { char b[8] = {0}; DWORD nr = 0; ReadFile(fh, b, 7, &nr, 0); CloseHandle(fh); u32 x = 0; int any = 0; for (DWORD k = 0; k < nr; k++) if (b[k] >= 0x30 && b[k] <= 0x39) { x = x * 10 + b[k] - 0x30; any = 1; } if (any && x >= 1 && x <= 8) v = x; }
             if (v != g_pN) { g_pN = v; g_pphase = 0; } }
         u32 s = g_r->pad[60]; if (!(s & 1) && s != g_pseq) { g_pseq = s; for (int k = 0; k < 16; k++) g_pm[k] = *(f32 *)&g_r->pad[64 + k]; g_pnf[0] = *(f32 *)&g_r->pad[62]; g_pnf[1] = *(f32 *)&g_r->pad[63]; }
         g_pon = !off && g_r->pad[61] && g_pseq; }
@@ -1311,7 +1397,11 @@ static void probe_flip(void) {
     if (!g_pfbo) {
         glGenTextures(2, g_ptex);
         glBindTexture(0x0DE1, g_ptex[0]); glTexImage2D(0x0DE1, 0, 0x8058, 16, 16, 0, 0x1908, 0x1401, 0); glTexParameteri(0x0DE1, 0x2800, 0x2600); glTexParameteri(0x0DE1, 0x2801, 0x2600);
-        glBindTexture(0x0DE1, g_ptex[1]); glTexImage2D(0x0DE1, 0, 0x81A6 /* DEPTH_COMPONENT24 */, 16, 16, 0, 0x1902, 0x1405, 0); glTexParameteri(0x0DE1, 0x2800, 0x2600); glTexParameteri(0x0DE1, 0x2801, 0x2600);
+        /* Nov 23: 32-bit float depth, read back as floats with no conversion, so the pixel-pack copy can run in the background. With
+           DEPTH_COMPONENT24 read as GL_FLOAT the driver seemed to convert at once, waiting for the GPU to finish the frame (~450 ms a
+           second in busy scenes). OPT-IN: probedepth32.txt (at start); no measurable gain, the wait was elsewhere. */
+        if (GetFileAttributesA("probedepth32.txt") != 0xFFFFFFFF) {   /* opt-in: made no measurable difference (Nov 23) */ glBindTexture(0x0DE1, g_ptex[1]); glTexImage2D(0x0DE1, 0, 0x8CAC /* DEPTH_COMPONENT32F */, 16, 16, 0, 0x1902, 0x1406, 0); }
+        else { glBindTexture(0x0DE1, g_ptex[1]); glTexImage2D(0x0DE1, 0, 0x81A6 /* DEPTH_COMPONENT24 */, 16, 16, 0, 0x1902, 0x1405, 0); } glTexParameteri(0x0DE1, 0x2800, 0x2600); glTexParameteri(0x0DE1, 0x2801, 0x2600);
         glBindTexture(0x0DE1, 0);
         glGenFramebuffers(1, &g_pfbo); glBindFramebuffer(0x8D40, g_pfbo); glFramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, g_ptex[0], 0); glFramebufferTexture2D(0x8D40, 0x8D00 /* DEPTH */, 0x0DE1, g_ptex[1], 0);
         glGenBuffers(3, g_ppbo); for (int k = 0; k < 3; k++) { glBindBuffer(0x88EB, g_ppbo[k]); glBufferData(0x88EB, 16 * 16 * 4, 0, 0x88E1); } glBindBuffer(0x88EB, 0);
@@ -1319,10 +1409,41 @@ static void probe_flip(void) {
     if (g_pon && g_pfbo) probe_replay(); else { g_nprec = 0; g_npidx = 0; g_npvtx = 0; g_npcon = 0; }
     {   u32 ph = g_pphase; g_pphase = (g_pphase + 1) % g_pN; if (ph != g_pN - 1) return; }   /* mid-cycle: the probe's depth keeps accumulating */
     if (g_pdrawn) {   /* this cycle's probe -> a pixel-pack buffer; last cycle's -> the nearest distance */
-        glBindFramebuffer(0x8CA8, g_pfbo); glBindBuffer(0x88EB, g_ppbo[g_ppi]); glReadPixels(0, 0, 16, 16, 0x1902, 0x1406, 0);
+        { long long ra, rb; QueryPerformanceCounter(&ra);
+          /* Nov 23: the depth readback itself made the driver wait for the GPU (256-362 ms a second in busy scenes, even with float
+             depth). A tiny pass copies the 16x16 depth into an R32F colour texture (unit 15) and that is read back instead: colour
+             pixel-pack copies run in the background. OPT-IN: probecolor.txt (at start); no measurable gain, the wait was elsewhere. */
+          static GLuint cprog, cfbo, ctex, cvao; static int cok = -1;
+          if (cok < 0) { cok = 0;
+              if (GetFileAttributesA("probecolor.txt") != 0xFFFFFFFF) {   /* opt-in: made no measurable difference (Nov 23) */
+                  GLuint vs = compile(0x8B31, "#version 130\nvoid main() { gl_Position = vec4(float((gl_VertexID & 1) * 4 - 1), float((gl_VertexID >> 1) * 4 - 1), 0.0, 1.0); }\n");
+                  GLuint fs = compile(0x8B30, "#version 130\nuniform sampler2D d; out vec4 o;\nvoid main() { o = vec4(texelFetch(d, ivec2(gl_FragCoord.xy), 0).r); }\n");
+                  if (vs && fs) { cprog = glCreateProgram(); glAttachShader(cprog, vs); glAttachShader(cprog, fs); glBindFragDataLocation(cprog, 0, "o"); glLinkProgram(cprog);
+                      GLint ok = 0; glGetProgramiv(cprog, 0x8B82, &ok);
+                      if (ok) { glUseProgram(cprog); glUniform1i(glGetUniformLocation(cprog, "d"), 15); g_curp = 0;
+                          glGenTextures(1, &ctex); glBindTexture(0x0DE1, ctex); glTexImage2D(0x0DE1, 0, 0x822E /* R32F */, 16, 16, 0, 0x1903 /* RED */, 0x1406, 0);
+                          glTexParameteri(0x0DE1, 0x2800, 0x2600); glTexParameteri(0x0DE1, 0x2801, 0x2600); glBindTexture(0x0DE1, 0);
+                          glGenFramebuffers(1, &cfbo); glBindFramebuffer(0x8D40, cfbo); glFramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, ctex, 0);
+                          glGenVertexArrays(1, &cvao); cok = 1; } } } }
+          if (cok == 1) {
+              glBindFramebuffer(0x8D40, cfbo); glViewport(0, 0, 16, 16);
+              glDisable(0x0B71); glDisable(0x0BE2); glDisable(0x0B44); glDisable(0x0C11); glDisable(0x0B90); glColorMask(1, 1, 1, 1);
+              glUseProgram(cprog); g_curp = 0; glActiveTexture(0x84CF /* unit 15 */); glBindTexture(0x0DE1, g_ptex[1]);
+              glBindVertexArray(cvao); glDrawArrays(4 /* TRIANGLES */, 0, 3); glBindVertexArray(g_vao);
+              glBindTexture(0x0DE1, 0); glActiveTexture(0x84C0);
+              glBindFramebuffer(0x8CA8, cfbo); glBindBuffer(0x88EB, g_ppbo[g_ppi]); glReadPixels(0, 0, 16, 16, 0x1903 /* RED */, 0x1406, 0); }
+          else { glBindFramebuffer(0x8CA8, g_pfbo); glBindBuffer(0x88EB, g_ppbo[g_ppi]); glReadPixels(0, 0, 16, 16, 0x1902, 0x1406, 0); }
+          QueryPerformanceCounter(&rb); g_pk_rp += rb - ra; }
         g_ppend[g_ppi] = 1; g_pnf_at[g_ppi][0] = g_pnf[0]; g_pnf_at[g_ppi][1] = g_pnf[1];
+        /* Nov 23: a fence per readback. In busy scenes the GPU ran more than two frames behind and glGetBufferSubData below waited for
+           it, ~450 ms a second (the replay itself is ~0.4 ms a frame). Now the oldest readback is read only once its fence has passed;
+           otherwise it is skipped (collision uses the last distance a little longer). probesync.txt (at start) = the old waiting read. */
+        static int pold = -1; if (pold < 0) pold = !(glFenceSync_ && glClientWaitSync_ && glDeleteSync_) || GetFileAttributesA("probesync.txt") != 0xFFFFFFFF;
+        static GLsync_ psync[3];
+        if (!pold) { if (psync[g_ppi]) glDeleteSync_(psync[g_ppi]); psync[g_ppi] = glFenceSync_(0x9117 /* GPU_COMMANDS_COMPLETE */, 0); }
         u32 o = (g_ppi + 1) % 3;   /* the oldest: read two cycles later, so the GPU is long done (performance) */
-        if (g_ppend[o]) { static f32 d[256]; glBindBuffer(0x88EB, g_ppbo[o]); glGetBufferSubData(0x88EB, 0, sizeof d, d); g_ppend[o] = 0;
+        int ready = 1; if (!pold && g_ppend[o] && psync[o]) { GLenum st = glClientWaitSync_(psync[o], 0, 0); ready = st == 0x911A /* ALREADY_SIGNALED */ || st == 0x911C /* CONDITION_SATISFIED */; }
+        if (g_ppend[o] && ready) { static f32 d[256]; glBindBuffer(0x88EB, g_ppbo[o]); glGetBufferSubData(0x88EB, 0, sizeof d, d); g_ppend[o] = 0;
             f32 mn = 1.0f; for (int k = 0; k < 256; k++) if (d[k] < mn) mn = d[k];
             f32 n = g_pnf_at[o][0], fa = g_pnf_at[o][1], dist = 1e9f;
             if (mn < 0.99999f && fa > n) { f32 z = mn * 2.0f - 1.0f; dist = 2.0f * fa * n / (fa + n - z * (fa - n)); }
@@ -1416,8 +1537,10 @@ static void do_draw_idx(u32 mode, u32 n, u32 mn, u32 mx, f32 *inl, u32 *idx) {
         default: glDisableVertexAttribArray(i); glVertexAttrib4fv(i, inl + i * 4); break;
         }
     }    PM(18) { PT0 for (u32 k = 0; k < n; k++) g_idxb[k] = idx[k] - mn;
-    glBindBuffer(0x8893, g_ibo); glBufferData(0x8893, n * 4, g_idxb, 0x88E0);
-    glDrawElements(mode - 1, n, 0x1405 /* UNSIGNED_INT */, 0); PT1(14) }
+    u32 ioff = 0;
+    if (n * 4 <= SRING_SZ && sring_on()) ioff = sring_put(&g_sr_idx, 0x8893, n * 4, g_idxb);
+    else { glBindBuffer(0x8893, g_ibo); glBufferData(0x8893, n * 4, g_idxb, 0x88E0); }
+    glDrawElements(mode - 1, n, 0x1405 /* UNSIGNED_INT */, (void *)ioff); PT1(14) }
     { PT0 probe_attrs(lo, glo, grp, gbuf, inl); probe_draw(1, mode, n, 0); PT1(15) }   /* Milestone 102 */
     PMS glBindVertexArray(g_vao); g_r->draws++; PM(23)
 }
@@ -1569,8 +1692,10 @@ static void do_draw_imm(u32 mode, u32 n, f32 *v) {
     if (g_skip_draw) return;
     hud_squeeze(v, n, 64);
     if (g_cur_fb) g_cur_fb->gpu_frame = GetTickCount();
-    glBindVertexArray(g_vao2); glBindBuffer(0x8892, g_vbo2); glBufferData(0x8892, n * 256, v, 0x88E0);
-    for (u32 i = 0; i < 16; i++) { glEnableVertexAttribArray(i); glVertexAttribPointer(i, 4, 0x1406, 0, 256, (void *)(i * 16)); }
+    glBindVertexArray(g_vao2); u32 voff = 0;
+    if (n * 256 <= SRING_SZ && sring_on()) voff = sring_put(&g_sr_imm, 0x8892, n * 256, v);   /* streaming ring (Nov 23) */
+    else { glBindBuffer(0x8892, g_vbo2); glBufferData(0x8892, n * 256, v, 0x88E0); }
+    for (u32 i = 0; i < 16; i++) { glEnableVertexAttribArray(i); glVertexAttribPointer(i, 4, 0x1406, 0, 256, (void *)(voff + i * 16)); }
     glDrawArrays(mode - 1, 0, n);
     probe_draw(0, mode, n, v);   /* Milestone 102 */
     glBindVertexArray(g_vao); g_r->draws++;
@@ -1871,7 +1996,7 @@ static void present_memory(u32 addr) {
 #define ZREC 2048
 static GLuint g_zqs[ZSEG]; static u32 g_zval[ZSEG], g_zvalid[ZSEG];   /* segment results (g_zvalid = segment number + 1 when read) */
 static u32 g_zseg, g_zbase;                                            /* next segment number; first segment since the last reset */
-static struct { u32 addr, s0, s1, gs, kind; } g_zrec[ZREC]; static u32 g_zrh, g_zrt;   /* pending reports (head = oldest) */
+static struct { u32 addr, s0, s1, gs, kind, fr; } g_zrec[ZREC]; static u32 g_zrh, g_zrt;   /* pending reports (head = oldest); fr = viewer frame */
 static u32 g_zmin = 2, g_zfixed, g_zsync = 2;
 static void zq_stop(void) { if (!g_zrun) return; glEndQuery(0x8914 /* SAMPLES_PASSED */); g_zseg++; g_zrun = 0; }
 static u32 g_zkind;   /* the kind of test of the report being written (primitive << 16 | vertices) */
@@ -1883,6 +2008,16 @@ static void zq_poll(int force) {   /* write every report whose segments are done
         if (s1 > s0 && !force && !zseg_ready(s1 - 1)) break;
         u32 cnt = 0; for (u32 s = s0; s < s1; s++) cnt += zseg_val(s);
         u32 gs = g_zrec[i].gs; if (gs > 1) cnt = (cnt + gs * gs - 1) / (gs * gs);   /* counts in Xbox pixels (gs x gs GPU pixels per Xbox pixel) */
+        g_zkind = g_zrec[i].kind; zrep_write(g_zrec[i].addr, cnt); g_zrh++; } }
+/* Nov 23: the flip waited for every count of the frame just drawn (the GPU finishing the whole frame, ~390 ms a second in a busy
+   mission, and a 30-60 ms frame every second). Now the flip forces only the counts of EARLIER frames (done long ago, no wait);
+   this frame's are written when ready or at the next flip: always exactly one frame late, never drifting (zlag.txt let them drift
+   several frames and objects flickered). zsameframe.txt (read every second) = the old wait. */
+static void zq_poll_prev(void) {
+    while (g_zrh != g_zrt) { u32 i = g_zrh % ZREC;
+        if (g_zrec[i].fr == g_frame) { zq_poll(0); return; }   /* this frame's: only if already done */
+        u32 s0 = g_zrec[i].s0, s1 = g_zrec[i].s1, cnt = 0; for (u32 s = s0; s < s1; s++) cnt += zseg_val(s);
+        u32 gs = g_zrec[i].gs; if (gs > 1) cnt = (cnt + gs * gs - 1) / (gs * gs);
         g_zkind = g_zrec[i].kind; zrep_write(g_zrec[i].addr, cnt); g_zrh++; } }
 static void zq_start(void) { if (g_zrun || !g_zon) return;
     if (g_zrh != g_zrt && g_zseg - g_zrec[g_zrh % ZREC].s0 >= ZSEG - 1) zq_poll(1);   /* a pending report still needs the slot about to be reused */
@@ -1928,15 +2063,15 @@ static void do_zpass(u32 op, u32 arg) {
     else if (op == 2 && arg + 16 <= 0x4000000) { zq_stop(); g_r->pad[43]++;
         /* the game's D3D marks a pending report with word 3 = 0xFFFFFFFF (count 0): it stays so until zrep_write fills in the count */
         if (g_zrt - g_zrh >= ZREC) zq_poll(1);
-        u32 i = g_zrt % ZREC; g_zrec[i].addr = arg; g_zrec[i].s0 = g_zbase; g_zrec[i].s1 = g_zseg; g_zrec[i].gs = g_cur_fb && g_cur_fb->gs ? g_cur_fb->gs : 1; g_zrec[i].kind = g_zprim << 16 | (g_zverts & 0xFFFF); g_zrt++;
+        u32 i = g_zrt % ZREC; g_zrec[i].fr = g_frame; g_zrec[i].addr = arg; g_zrec[i].s0 = g_zbase; g_zrec[i].s1 = g_zseg; g_zrec[i].gs = g_cur_fb && g_cur_fb->gs ? g_cur_fb->gs : 1; g_zrec[i].kind = g_zprim << 16 | (g_zverts & 0xFFFF); g_zrt++;
         zq_poll(g_zsync); zq_start(); }
 }
 static void do_flip(u32 addr) {
     cap_poll(); cap_flip(); g_draw_seq++;
     {   /* every pixel count of this frame is written before the flip: one wait per frame, not one per report (counts arriving several
            frames late made objects flicker: the game hides and shows them by these counts). zlag.txt (read every second) = no wait at the flip. */
-        static u32 tl, lag; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; lag = GetFileAttributesA("zlag.txt") != 0xFFFFFFFF; }
-        PMS zq_poll(!lag); PM(24) }
+        static u32 tl, lag, same; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; lag = GetFileAttributesA("zlag.txt") != 0xFFFFFFFF; same = GetFileAttributesA("zsameframe.txt") != 0xFFFFFFFF; }
+        PMS if (lag) zq_poll(0); else if (same) zq_poll(1); else zq_poll_prev(); PM(24) }
     PMS
     probe_flip();   /* Milestone 102: the camera-collision probe of this frame */
     menu_flip();    /* Milestone 103: the menu options drawn this frame */
@@ -2000,12 +2135,38 @@ static void prof_report(void) {
             *o++ = '/'; o = pf_num(o, (u32)((long long)g_pr_n[i] * g_pf_qf / el)); *o++ = 'x'; *o++ = '/'; o = pf_num(o, (u32)((long long)g_pr_w[i] * 4 * g_pf_qf / el / 1024)); o = pf_str(o, "KB"); }
         o = pf_str(o, "  commands total "); o = pf_num(o, (u32)(tot * 1000 / el)); o = pf_str(o, " ms/s");
         o = pf_str(o, "  | GPU ms/s:"); { unsigned long long gt = 0; for (u32 i = 1; i < 12; i++) if (g_gpu_ns[i]) { gt += g_gpu_ns[i]; *o++ = 0x20; o = pf_str(o, nm[i]); *o++ = 0x3D; o = pf_num(o, (u32)(g_gpu_ns[i] * g_pf_qf / el / 1000000)); }
-            o = pf_str(o, " total "); o = pf_num(o, (u32)(gt * g_pf_qf / el / 1000000)); } o = pf_str(o, "  spec programs "); o = pf_num(o, g_spec_built); o = pf_str(o, " failed "); o = pf_num(o, g_spec_fail); o = pf_str(o, g_spec > 0 ? " (on)" : " (off)"); o = pf_str(o, "\r\n");
+            o = pf_str(o, " total "); o = pf_num(o, (u32)(gt * g_pf_qf / el / 1000000)); } o = pf_str(o, "  spec programs "); o = pf_num(o, g_spec_built); o = pf_str(o, " failed "); o = pf_num(o, g_spec_fail); o = pf_str(o, g_spec > 0 ? " (on)" : " (off)");
+        o = pf_str(o, "  probe: groups "); o = pf_num(o, g_pN); o = pf_str(o, " draws/replay "); o = pf_num(o, g_pk_frames ? g_pk_recs / g_pk_frames : 0);
+        o = pf_str(o, " us/replay "); o = pf_num(o, g_pk_frames ? (u32)(g_pk_t5 * 1000000 / g_pf_qf / g_pk_frames) : 0); o = pf_str(o, "\r\n");
+        o -= 2; o = pf_str(o, " readpixels ms/s "); o = pf_num(o, (u32)(g_pk_rp * 1000 / el));
+        o = pf_str(o, "  batch: draws "); o = pf_num(o, g_bj_n); o = pf_str(o, " clean "); o = pf_num(o, g_bj_clean); o = pf_str(o, " addr-only "); o = pf_num(o, g_bj_addr); o = pf_str(o, "\r\n");
+        g_bj_n = g_bj_clean = g_bj_addr = 0;
+        {   /* the 12 registers changed most often in this period (byte offset x 4 = method): batch_regs.txt, appended */
+            static char t[600]; char *w = t; w = pf_str(w, "regs:"); for (int k = 0; k < 12; k++) { u32 bi = 0, bv = 0; for (u32 r = 0; r < 0x800; r++) if (g_bj_reg[r] > bv) { bv = g_bj_reg[r]; bi = r; } if (!bv) break;
+                *w++ = 0x20; for (int s = 12; s >= 0; s -= 4) { u32 h = (bi * 4 >> s) & 0xF; *w++ = (char)(h < 10 ? 0x30 + h : 0x37 + h); } *w++ = 0x3D; w = pf_num(w, bv); g_bj_reg[bi] = 0; }
+            w = pf_str(w, "\r\n"); for (u32 r = 0; r < 0x800; r++) g_bj_reg[r] = 0;
+            HANDLE fh = CreateFileA("batch_regs.txt", 0x4, 1, 0, 4, 0x80, 0); if (fh != (HANDLE)-1) { DWORD wr; WriteFile(fh, t, (DWORD)(w - t), &wr, 0); CloseHandle(fh); } }
+        g_pk_recs = 0; g_pk_frames = 0; g_pk_t5 = 0; g_pk_rp = 0;
         HANDLE fh = CreateFileA("perf_profile.txt", 0x4, 1, 0, 4, 0x80, 0); if (fh != (HANDLE)-1) { DWORD wr; WriteFile(fh, b, (DWORD)(o - b), &wr, 0); CloseHandle(fh); } }
     for (u32 i = 0; i < 16; i++) g_gpu_ns[i] = 0;
     for (u32 i = 0; i < 28; i++) { g_pr_t[i] = 0; g_pr_n[i] = 0; g_pr_w[i] = 0; } }
+/* hitch log (Nov 23): any single ring command, or any gap between gl_pump calls (window messages, sound...), over 25 ms -> a line in
+   hitch_log.txt: seconds since start, what (command type number, or "gap"), ms, frame, specialised / vertex programs built so far.
+   Up to 400 lines per run; nohitchlog.txt (at start) = off. */
+static long long g_pump_end;
+static void hitch_line(const char *what, u32 type, u32 ms) {
+    static int on = -1; static u32 nl, t0; if (on < 0) { on = GetFileAttributesA("nohitchlog.txt") == 0xFFFFFFFF; t0 = GetTickCount(); if (on) { HANDLE f = CreateFileA("hitch_log.txt", 0x40000000, 1, 0, 2, 0x80, 0); if (f != (HANDLE)-1) CloseHandle(f); } }
+    if (!on || nl >= 400) return; nl++;
+    char b[160]; u32 q = 0; u32 v[6] = {(GetTickCount() - t0) / 1000, type, ms, g_frame, g_spec_built, g_vsh_built};
+    for (const char *s = what; *s; ) b[q++] = *s++; b[q++] = 0x20;
+    for (int k = 0; k < 6; k++) { u32 x = v[k]; char d[12]; int z = 0; do d[z++] = (char)(0x30 + x % 10); while (x /= 10); while (z) b[q++] = d[--z]; b[q++] = 0x20; }
+    b[q++] = 0x0D; b[q++] = 0x0A;
+    HANDLE f = CreateFileA("hitch_log.txt", 0x04, 1, 0, 4, 0x80, 0); if (f != (HANDLE)-1) { DWORD w; WriteFile(f, b, q, &w, 0); CloseHandle(f); } }
+static void hitch_check(long long dt, u32 type) { static long long qf; if (!qf) QueryPerformanceFrequency(&qf); u32 ms = (u32)(dt * 1000 / qf); if (ms > 25) hitch_line("cmd", type, ms); }
 int gl_pump(void) {
     if (!g_r || !g_r->gl_ok) return 0;
+    { static long long qf; long long now; if (!qf) QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&now);
+      if (g_pump_end) { u32 ms = (u32)((now - g_pump_end) * 1000 / qf); if (ms > 25) hitch_line("gap", 0, ms); } }   /* time outside the pump */
     if (g_zrh != g_zrt) { static u32 fl; if (g_r->rpos == g_r->wpos && fl != g_zrt) { fl = g_zrt; glFlush(); } zq_poll(0); }   /* pixel counts the GPU has finished (the game may be waiting for one) */
     u32 t0 = GetTickCount(), did = 0;
     while (g_r->rpos != g_r->wpos && GetTickCount() - t0 < 10) {
@@ -2017,24 +2178,43 @@ int gl_pump(void) {
             u32 k = g_gq_head % GQN; if (!g_gq[k]) glGenQueries(1, &g_gq[k]); g_gq_type[k] = (u8)type; glBeginQuery(0x88BF /* TIME_ELAPSED */, g_gq[k]); gq = (int)k; g_gq_head++; }
         switch (type) {
         case CMD_STATE: cpy(g_kel, a, 0x2000); g_state_ok = 0; break;
-        case CMD_STATE_DELTA: for (u32 q = 0; q + 2 <= len - 1; q += 2) { u32 ix = a[q]; if (ix < 0x800) g_kel[ix] = a[q + 1]; } g_state_ok = 0; break;
+        case CMD_STATE_DELTA: {   /* Nov 23: only registers apply_state reads make it run again. The busy mission changed the constant upload
+                                     window (0x0B00-0x0BFF, the constants come as CMD_CONST) and vertex addresses / index / inline vertex data
+                                     (0x1720-0x1AFF, read at each draw) before nearly every draw, so the full GL state was re-applied ~100,000
+                                     times a second. OPT-IN (newstateok.txt, read every second): pictures matched, but the setup time per
+                                     draw did not drop and fps did not measurably change, so the default stays "any change re-applies". */
+            static u32 tl, old; u32 now = GetTickCount(); if (now - tl > 1000) { tl = now; old = GetFileAttributesA("newstateok.txt") == 0xFFFFFFFF; }
+            int real = old;
+            for (u32 q = 0; q + 2 <= len - 1; q += 2) { u32 ix = a[q]; if (ix < 0x800) { g_kel[ix] = a[q + 1]; if (!((ix >= 0x2C0 && ix <= 0x2FF) || (ix >= 0x5C8 && ix <= 0x6BF))) real = 1; } }
+            if (real) g_state_ok = 0; break; }
         case CMD_DRAW: do_draw(a[0], a[1], a + 2); break;
         case CMD_CLEAR: do_clear(a[0]); break;
         case CMD_FLIP: do_flip(a[0]); break;
         case CMD_FENCE: g_r->fence_done = a[0]; break;
         case CMD_VSH: g_vstart = a[0] < 136 ? a[0] : 0; cpy(g_vprog, a + 1, 136 * 16); break;
-        case CMD_CONST: if (a[0] < 192 && a[0] + a[1] <= 192) { cpy(&g_vc[a[0]], a + 2, a[1] * 16); g_vcgen++; } break;
+        case CMD_CONST: if (a[0] < 192 && a[0] + a[1] <= 192) { cpy(&g_vc[a[0]], a + 2, a[1] * 16); g_vcgen++; if (a[0] < g_cd_lo) g_cd_lo = a[0]; if (a[0] + a[1] > g_cd_hi) g_cd_hi = a[0] + a[1]; } break;
         case CMD_DRAW_IDX: do_draw_idx(a[0], a[1], a[2], a[3], (f32 *)(a + 4), a + 4 + 64); break;
         case CMD_DRAW_IMM: do_draw_imm(a[0], a[1], (f32 *)(a + 2)); break;
         case CMD_ZPASS: do_zpass(a[0], a[1]); break;
         }
         if (gq >= 0) glEndQuery(0x88BF);
-        { long long pq1; QueryPerformanceCounter(&pq1); if (type < 12) { g_pr_t[type] += pq1 - pq0; g_pr_n[type]++; g_pr_w[type] += len; } }
+        {   /* batching survey (Nov 23): an indexed draw is "clean" if only constant updates (or fences) came since the previous indexed draw
+               (same program, state, textures, vertex arrays - only constants and indices differ); "addr" also allows state changes that touch
+               nothing but the vertex array addresses (0x1720-0x175C). Counts go into the perf_profile.txt line. */
+            static int clean, addr;
+            if (type == CMD_DRAW_IDX) { g_bj_n++; if (clean) g_bj_clean++; else if (addr) g_bj_addr++; clean = 1; addr = 1; }
+            else if (type == CMD_STATE_DELTA) { int real = 0, vaddr = 0; for (u32 q = 0; q + 2 <= len - 1; q += 2) { u32 ix = a[q]; if (ix < 0x800) g_bj_reg[ix]++;
+                    if (ix >= 0x5C8 && ix <= 0x5D7) vaddr = 1; else if (!((ix >= 0x2C0 && ix <= 0x2FF) || (ix >= 0x5D8 && ix <= 0x6BF))) real = 1; }
+                if (real) { clean = 0; addr = 0; } else if (vaddr) clean = 0; }   /* constant window / index / inline data alone keep a draw "clean" */
+            else if (type != CMD_CONST && type != CMD_FENCE) { clean = 0; addr = 0; } }
+        { long long pq1; QueryPerformanceCounter(&pq1); if (type < 12) { g_pr_t[type] += pq1 - pq0; g_pr_n[type]++; g_pr_w[type] += len; }
+          hitch_check(pq1 - pq0, type); }
         __sync_synchronize(); g_r->rpos = p + len; did = 1;
     }
     while (g_gq_tail != g_gq_head) { u32 k = g_gq_tail % GQN; GLuint av = 0; glGetQueryObjectuiv(g_gq[k], 0x8867 /* RESULT_AVAILABLE */, &av); if (!av) break;
         GLuint ns = 0; glGetQueryObjectuiv(g_gq[k], 0x8866 /* RESULT */, &ns); g_gpu_ns[g_gq_type[k]] += (unsigned long long)ns * 8; g_gq_tail++; }
     prof_report();
+    QueryPerformanceCounter(&g_pump_end);
     return did;
 }
 
@@ -2055,6 +2235,8 @@ int gl_init(void *wnd) {
     void *rc = wglCreateContext(g_dc);
     if (!rc || !wglMakeCurrent(g_dc, rc)) { info("no OpenGL context"); g_r->gl_failed = 1; return 0; }
     #define LOAD(n) if (!(*(void **)&n = glp(#n))) { info("missing "); info(#n); g_r->gl_failed = 1; return 0; }
+    *(void **)&glFenceSync_ = glp("glFenceSync"); *(void **)&glClientWaitSync_ = glp("glClientWaitSync"); *(void **)&glDeleteSync_ = glp("glDeleteSync");
+    *(void **)&glBufferSubData_ = glp("glBufferSubData");   /* streaming rings (Nov 23); without it the old per-draw uploads are used */
     LOAD(glDeleteBuffers) LOAD(glGetBufferSubData) LOAD(glGenBuffers) LOAD(glBindBuffer) LOAD(glBufferData) LOAD(glGenFramebuffers) LOAD(glBindFramebuffer) LOAD(glFramebufferTexture2D) LOAD(glFramebufferRenderbuffer)
     LOAD(glGenRenderbuffers) LOAD(glBindRenderbuffer) LOAD(glRenderbufferStorage) LOAD(glCheckFramebufferStatus) LOAD(glBlitFramebuffer) LOAD(glCreateShader) LOAD(glShaderSource)
     LOAD(glCompileShader) LOAD(glGetShaderiv) LOAD(glGetShaderInfoLog) LOAD(glCreateProgram) LOAD(glAttachShader) LOAD(glLinkProgram) LOAD(glGetProgramiv) LOAD(glGetProgramInfoLog)
@@ -2069,6 +2251,24 @@ int gl_init(void *wnd) {
     glLinkProgram(g_prog);
     GLint ok = 0; glGetProgramiv(g_prog, 0x8B82, &ok);
     if (!ok) { char log[200]; GLsizei n = 0; glGetProgramInfoLog(g_prog, 199, &n, log); log[n < 199 ? n : 199] = 0; info(" link: "); info(log); g_r->gl_failed = 1; return 0; }
+    {   /* constants block (Nov 23): on if the driver has it, a test shader with the block compiles, and oldconst.txt is absent */
+        *(void **)&glGetUniformBlockIndex_ = glp("glGetUniformBlockIndex"); *(void **)&glUniformBlockBinding_ = glp("glUniformBlockBinding"); *(void **)&glBindBufferBase_ = glp("glBindBufferBase");
+        /* OPT-IN (constbuffer.txt): tested Nov 23 in Return to Osiris, the per-draw glBufferSubData into the block made the driver
+           stall - 16 hitches of 200-1,000 ms in a minute and setup ~5.8 us a draw instead of ~1.5. Needs a ring of snapshots
+           (glBindBufferRange at a fresh offset per change) before it can be the default. */
+        *(void **)&glBufferStorage_ = glp("glBufferStorage"); *(void **)&glMapBufferRange_ = glp("glMapBufferRange"); *(void **)&glBindBufferRange_ = glp("glBindBufferRange");
+        /* opt-in (constring.txt): it drew correctly but made no measurable difference in the busy part of Return to Osiris (Nov 23) */
+        int ring = glBufferStorage_ && glMapBufferRange_ && glBindBufferRange_ && glFenceSync_ && glClientWaitSync_ && glDeleteSync_ && GetFileAttributesA("constring.txt") != 0xFFFFFFFF;
+        int sub = !ring && GetFileAttributesA("constbuffer.txt") != 0xFFFFFFFF;   /* the first design (stalled), opt-in only */
+        if (glGetUniformBlockIndex_ && glUniformBlockBinding_ && glBindBufferBase_ && glBufferSubData_ && (ring || sub)) {
+            GLuint t = compile(0x8B31, "#version 130\n#extension GL_ARB_uniform_buffer_object : require\nlayout(std140) uniform CB { vec4 u_c[192]; };\nin vec4 v0; uniform int u_i;\nvoid main() { gl_Position = v0 + u_c[clamp(u_i, 0, 191)]; }\n");
+            if (t && ring) { GLuint b = 0; glGenBuffers(1, &b); glBindBuffer(0x8A11, b);
+                glBufferStorage_(0x8A11, CR_SEG * CR_NSEG, 0, 0x2 | 0x40 | 0x80 /* WRITE | PERSISTENT | COHERENT */);
+                void *m = glMapBufferRange_(0x8A11, 0, CR_SEG * CR_NSEG, 0x2 | 0x40 | 0x80);
+                if (m) { g_ubo = b; g_cr_map = m; g_cr_off = 0; g_cr_seg = 0; cr_put(g_vc); g_cbgen = g_vcgen; } else glDeleteBuffers(1, &b); }
+            else if (t && sub) { GLuint b = 0; glGenBuffers(1, &b); glBindBuffer(0x8A11, b); glBufferData(0x8A11, 192 * 16, g_vc, 0x88E8 /* DYNAMIC_DRAW */); glBindBufferBase_(0x8A11, 0, b); g_ubo = b; g_cd_lo = 192; g_cd_hi = 0; }
+        }
+        info(g_cr_map ? " constants: ring" : g_ubo ? " constants: uniform buffer" : " constants: per-program uniforms"); }
     g_fsobj = fs; g_fixedp.id = g_prog; g_fixedp.vs = vs; prog_locs(&g_fixedp); g_curp = 0; spec_init();
     LOAD(glVertexAttrib4fv) LOAD(glDisableVertexAttribArray)
     g_stage = HeapAlloc(GetProcessHeap(), 0, 16 * 262144 * 16); g_idxb = HeapAlloc(GetProcessHeap(), 0, (1u << 20) * 4);

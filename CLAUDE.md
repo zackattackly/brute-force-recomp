@@ -200,6 +200,29 @@ lld-link /subsystem:console /entry:start /base:0x10000 /fixed /dynamicbase:no /l
   +0x5D0 (froze it). Re-running the hit ray within one shot crashed the game. The cover test (coverunlock.txt) is off; its RING
   slots are pad[96..107] (pad[64..79] = the camera probe matrix - overwriting it broke collision). oldlock.txt = hard lock + swipes.
 
+- Performance (Nov 23, Return to Osiris): busy spots (1,500-3,500 draws/frame) had bfview 97-100% busy at 36-47 fps while the GPU was
+  ~55%. Fixed in bfgl.c: (1) index + immediate-vertex uploads go into 8 MB streaming rings (sring_put, glBufferSubData) instead of a
+  glBufferData per draw (~4 us -> ~0.3 us; oldupload.txt = old); (2) probe_replay sets only attribute state that changed (255 -> ~95
+  ms/s; oldprobereplay.txt); (3) the flip no longer waits for this frame's pixel counts: zq_poll_prev forces only earlier frames'
+  reports, so counts are exactly one frame late (wait 390 -> 0 ms/s; zsameframe.txt = old wait, zlag.txt still = drifting).
+  Result: 90 s at 60.0 fps, average worst frame 19 ms (was ~41), no frame over 100 ms, viewer ~22%.
+  FAILED: one uniform buffer for the 192 vertex constants with per-draw glBufferSubData -> driver stalls, 200-1,000 ms hitches; kept
+  opt-in only (constbuffer.txt). A ring of snapshots + glBindBufferRange would be the way if constants matter again.
+  hitch_log.txt: every viewer command or gap over 25 ms (secs, cmd/gap, type, ms, frame, spec programs, vertex programs built).
+  Later the same day, the HEAVIEST part of Return to Osiris (2,200-3,800 draws/frame) still ran 44-50 fps (low ~38). Findings:
+  the probe step ("probe+menu", ~450 ms/s) is a WAIT, not work: replay ~0.4 ms/frame, the time sits in the first call that blocks
+  (glReadPixels) - the driver throttling. Proven NOT the limit: GPU fill (resscale 1 = no gain), probe redraws (probeevery 3 = no
+  gain), constants (constring.txt ring = no gain), depth-read format (probedepth32.txt / probecolor.txt = no gain). nvidia-smi:
+  GPU 15-64% while bfview jumps from ~28% busy at 870 draws to ~96% at 1,540 - a cliff, so the driver blocks once a frame holds
+  that many small draws. Next idea: fewer GL draw calls (merge consecutive draws sharing program/state/buffers, or multi-draw).
+  Automatic probe groups (by replay time, > 2.5 ms) stay in but rarely trigger; probe stats in the perf_profile.txt line.
+  The infinite special energy switch (infinitespecial.txt) is back at the user's request.
+  Batching survey (perf_profile.txt "batch:" line, batch_regs.txt = most-changed registers): the registers changed between draws are
+  mostly NOT state - 0x0B80-0x0BA8 (constant upload window), 0x1800 (indices), 0x1880/0x18C8 (inline vertex data), 0x1720-0x1744
+  (vertex addresses). Ignoring those, ~26-32% of indexed draws differ from the previous one only in constants/indices ("clean") and
+  another ~10-20% also in vertex addresses. So at most ~45% could merge, and only with per-draw constants indexed in the shader
+  (multi-draw + gl_DrawID or similar) - a large renderer change. newstateok.txt (live) skips apply_state for those registers: pictures
+  match, but no measurable gain (setup ~1.3 us/draw either way), so it is opt-in.
 - Frame cap (Nov 21): after the readable() fix the game ran ~170 frames/s on a 60 Hz screen (choppy, skipping turns). input.c
   mouse_apply waits for the next vblank (g_vblanks follows the monitor; max 20 ms) - one game frame per refresh as on the Xbox.
   nofpscap.txt = uncapped. (The earlier "Tex runs 4 updates per frame" was this.)
